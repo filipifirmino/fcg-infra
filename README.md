@@ -1,250 +1,141 @@
 # FCG Infra — Grupo 14
 
-Repositório de orquestração da plataforma FIAP Cloud Games (FCG). Contém o `docker-compose.yml` para execução local completa e os manifests Kubernetes para deploy em cluster.
+Repositório de orquestração da plataforma **FIAP Cloud Games (FCG)**. Centraliza o `docker-compose.yml` para execução local completa e todos os manifests Kubernetes para deploy em cluster. Não contém código de aplicação.
 
 ---
 
 ## Sumário
 
 - [Visão Geral](#visão-geral)
-- [Microsserviços](#microsserviços)
-- [Arquitetura](#arquitetura)
+- [Arquitetura e Fluxo de Eventos](#arquitetura-e-fluxo-de-eventos)
 - [Pré-requisitos](#pré-requisitos)
-- [Rodando com Docker Compose](#rodando-com-docker-compose)
+- [Estrutura do Repositório](#estrutura-do-repositório)
+- [Execução com Docker Compose](#execução-com-docker-compose)
 - [Deploy no Kubernetes](#deploy-no-kubernetes)
 - [Variáveis de Ambiente](#variáveis-de-ambiente)
-- [Estrutura do Repositório](#estrutura-do-repositório)
+- [Endpoints das APIs](#endpoints-das-apis)
+- [Troubleshooting](#troubleshooting)
 
 ---
 
 ## Visão Geral
 
-Este repositório centraliza a infraestrutura de orquestração dos quatro microsserviços FCG. Não contém código de aplicação — apenas configurações de ambiente, containers e manifests de deploy.
+A FCG é composta por **quatro microsserviços independentes** que se comunicam de forma assíncrona via **RabbitMQ + MassTransit**. Cada serviço tem seu próprio repositório, banco de dados e ciclo de vida.
 
-| Repositório | Responsabilidade | Porta |
+| Microsserviço | Repositório | Tipo | Porta (host) |
+|---|---|---|---|
+| UsersAPI | `fcg-users-api` | Web API | `8080` |
+| CatalogAPI | `fcg-catalog-api` | Web API | `8081` |
+| PaymentsAPI | `fcg-payments-api` | Worker Service | — |
+| NotificationsAPI | `fcg-notifications-api` | Worker Service | — |
+
+**Infraestrutura compartilhada:**
+
+| Serviço | Porta (host) | Finalidade |
 |---|---|---|
-| [fcg-users-api](../fcg-users-api) | Cadastro e autenticação de usuários | 8080 |
-| [fcg-catalog-api](../fcg-catalog-api) | Catálogo de jogos e fluxo de compra | 8081 |
-| [fcg-payments-api](../fcg-payments-api) | Simulação de pagamentos (Worker) | — |
-| [fcg-notifications-api](../fcg-notifications-api) | Notificações por e-mail simuladas (Worker) | — |
+| PostgreSQL 16 | `5432` | Banco de dados (1 DB por serviço, 1 instância) |
+| RabbitMQ 3 | `5672` / `15672` | Broker de mensagens / Management UI |
 
 ---
 
-## Microsserviços
-
-### Fluxo de eventos
+## Arquitetura e Fluxo de Eventos
 
 ```
-UsersAPI  ──UserCreatedEvent──────────────────────────────▶  NotificationsAPI
-               (user.created)                                  (boas-vindas)
-
-CatalogAPI  ──OrderPlacedEvent──▶  PaymentsAPI  ──PaymentProcessedEvent──┬──▶  CatalogAPI
-                (order.placed)       (simulação)    (payment.processed)   │      (biblioteca)
-                                                                          └──▶  NotificationsAPI
-                                                                                 (confirmação)
+┌─────────────────────────────────────────────────────────────────────┐
+│                         KUBERNETES CLUSTER                          │
+│                                                                     │
+│  ┌──────────────┐    ┌──────────────┐    ┌───────────────────────┐  │
+│  │  UsersAPI    │    │  CatalogAPI  │    │     PaymentsAPI       │  │
+│  │  port: 8080  │    │  port: 8081  │    │   (Worker — sem HTTP) │  │
+│  │              │    │              │    │                       │  │
+│  │ POST /register│   │ GET  /games  │    │  Consome:             │  │
+│  │ POST /login  │    │ POST /games  │    │    OrderPlacedEvent   │  │
+│  │ GET  /users  │    │ PATCH /games │    │  Publica:             │  │
+│  │ PATCH /users │    │ DELETE /games│    │    PaymentProcessed   │  │
+│  │              │    │ POST /acquire│    │    Event              │  │
+│  └──────┬───────┘    └──────┬───────┘    └──────────┬────────────┘  │
+│         │                   │                        │              │
+│  UserCreatedEvent     OrderPlacedEvent         PaymentProcessedEvent│
+│         │                   │                        │              │
+│         └───────────────────┴────────────────────────┘              │
+│                             │                                       │
+│                    ┌────────▼────────┐                              │
+│                    │    RabbitMQ     │                              │
+│                    │  amqp: 5672     │                              │
+│                    │  mgmt: 15672    │                              │
+│                    └────────┬────────┘                              │
+│                             │                                       │
+│                   ┌─────────▼──────────┐                            │
+│                   │  NotificationsAPI  │                            │
+│                   │  (Worker — sem HTTP│                            │
+│                   │                   │                            │
+│                   │  Consome:         │                            │
+│                   │    UserCreated    │                            │
+│                   │    PaymentProc.   │                            │
+│                   └───────────────────┘                            │
+│                                                                     │
+│  ┌─────────────────────────────────────────────────────────────┐   │
+│  │  PostgreSQL  (postgres:5432)                                │   │
+│  │  ├── fcg_users_db    (UsersAPI)                             │   │
+│  │  ├── fcg_catalog_db  (CatalogAPI)                           │   │
+│  │  └── fcg_payments_db (PaymentsAPI)                          │   │
+│  └─────────────────────────────────────────────────────────────┘   │
+└─────────────────────────────────────────────────────────────────────┘
 ```
 
-### Bancos de dados (1 por serviço)
-
-| Serviço | Banco | Tabelas |
-|---|---|---|
-| UsersAPI | `fcg_users_db` | `users` |
-| CatalogAPI | `fcg_catalog_db` | `games`, `acquisitions` |
-| PaymentsAPI | `fcg_payments_db` | `payments` |
-| NotificationsAPI | — | (sem persistência) |
-
----
-
-## Arquitetura
+### Fluxo 1 — Cadastro de Usuário
 
 ```
-┌─────────────────────────────────────────────────────────────────┐
-│                        KUBERNETES CLUSTER                       │
-│                                                                 │
-│  ┌──────────────┐   ┌──────────────┐   ┌──────────────────┐    │
-│  │  UsersAPI    │   │  CatalogAPI  │   │   PaymentsAPI    │    │
-│  │  :8080       │   │  :8081       │   │   (worker only)  │    │
-│  └──────┬───────┘   └──────┬───────┘   └────────┬─────────┘    │
-│         │                  │                     │              │
-│         │ UserCreated       │ OrderPlaced         │ PaymentProc. │
-│         └──────────────────┴─────────────────────┴──────────┐  │
-│                                                              │  │
-│                     ┌────────────────┐                       │  │
-│                     │   RabbitMQ     │◀──────────────────────┘  │
-│                     │   :5672/:15672 │                          │
-│                     └───────┬────────┘                          │
-│                             │                                   │
-│                    ┌────────▼──────────┐                        │
-│                    │  NotificationsAPI │                        │
-│                    │  (worker only)    │                        │
-│                    └───────────────────┘                        │
-└─────────────────────────────────────────────────────────────────┘
+Cliente → POST /api/v1/users/register
+    └─► UsersAPI cria usuário no banco
+            └─► publica UserCreatedEvent
+                    └─► NotificationsAPI consome
+                            └─► [EMAIL SIMULADO] log de boas-vindas
+```
+
+### Fluxo 2 — Compra de Jogo
+
+```
+Cliente → POST /api/v1/games/{id}/acquire  (JWT obrigatório)
+    └─► CatalogAPI publica OrderPlacedEvent → retorna 202 Accepted
+            └─► PaymentsAPI consome OrderPlacedEvent
+                    └─► Simula pagamento (90% aprovado / 10% rejeitado)
+                            └─► publica PaymentProcessedEvent
+                                    ├─► CatalogAPI consome
+                                    │       └─► [Approved] adiciona jogo à biblioteca do usuário
+                                    └─► NotificationsAPI consome
+                                            └─► [Approved] [EMAIL SIMULADO] confirmação de compra
 ```
 
 ---
 
 ## Pré-requisitos
 
-- [Docker Desktop](https://www.docker.com/products/docker-desktop/) com Kubernetes habilitado (ou [Kind](https://kind.sigs.k8s.io/) / [Minikube](https://minikube.sigs.k8s.io/))
-- [kubectl](https://kubernetes.io/docs/tasks/tools/)
-- Repositórios dos microsserviços clonados na mesma pasta raiz
+| Ferramenta | Versão mínima | Instalação |
+|---|---|---|
+| Docker Desktop | 4.x | [docker.com](https://www.docker.com/products/docker-desktop/) |
+| Docker Compose | v2 (incluso no Desktop) | — |
+| kubectl | 1.28+ | [kubernetes.io/docs/tasks/tools](https://kubernetes.io/docs/tasks/tools/) |
+| Kubernetes local | qualquer | Docker Desktop K8s, Kind, Minikube ou k3d |
+| .NET SDK | 10.0 | Apenas para build fora do Docker |
 
-### Estrutura esperada de diretórios
+### Estrutura de diretórios esperada
+
+Todos os repositórios devem estar clonados **na mesma pasta raiz**:
 
 ```
-./ (pasta raiz)
+FIAP - MS/              ← pasta raiz
 ├── fcg-users-api/
 ├── fcg-catalog-api/
 ├── fcg-payments-api/
 ├── fcg-notifications-api/
 └── fcg-infra/          ← este repositório
     ├── docker-compose.yml
+    ├── .env.example
     └── k8s/
 ```
 
----
-
-## Rodando com Docker Compose
-
-### 1. Configure as variáveis de ambiente
-
-Crie um arquivo `.env` na raiz deste repositório:
-
-```env
-JWT_SECRET=UvPTu5UZIcSe0V1onJSNTWT579OHlmoxXA1flLgKpow=
-```
-
-### 2. Suba todos os serviços
-
-```bash
-docker compose up -d
-```
-
-Serviços iniciados:
-
-| Serviço | Container | Porta(s) |
-|---|---|---|
-| PostgreSQL 16 | `fcg_postgres` | `5432` |
-| RabbitMQ 3 | `fcg_rabbitmq` | `5672` / `15672` (management) |
-| UsersAPI | `fcg_users_api` | `8080` |
-| CatalogAPI | `fcg_catalog_api` | `8081` |
-| PaymentsAPI Worker | `fcg_payments_worker` | — |
-| NotificationsAPI Worker | `fcg_notifications_worker` | — |
-
-### 3. Verifique os logs
-
-```bash
-# Todos os serviços
-docker compose logs -f
-
-# Serviço específico
-docker compose logs -f users-api
-docker compose logs -f notifications-worker
-```
-
-### 4. Acesse os serviços
-
-| Serviço | URL |
-|---|---|
-| UsersAPI Swagger | http://localhost:8080/swagger |
-| CatalogAPI Swagger | http://localhost:8081/swagger |
-| RabbitMQ Management | http://localhost:15672 (guest/guest) |
-
-### 5. Encerre os serviços
-
-```bash
-docker compose down
-# Para remover também os volumes (banco de dados):
-docker compose down -v
-```
-
----
-
-## Deploy no Kubernetes
-
-### 1. Build das imagens Docker locais
-
-Execute na pasta raiz (onde estão os repositórios dos microsserviços):
-
-```bash
-docker build -t fcg-users-api:latest ./fcg-users-api
-docker build -t fcg-catalog-api:latest ./fcg-catalog-api
-docker build -t fcg-payments-api:latest ./fcg-payments-api
-docker build -t fcg-notifications-api:latest ./fcg-notifications-api
-```
-
-### 2. Configure os Secrets
-
-Edite `k8s/secret.yaml` substituindo os valores base64:
-
-```bash
-# Gere os valores base64
-echo -n "Host=postgres;Port=5432;Database=fcg_users_db;Username=fcg;Password=fcg_secret" | base64
-echo -n "UvPTu5UZIcSe0V1onJSNTWT579OHlmoxXA1flLgKpow=" | base64
-echo -n "fcg_secret" | base64
-```
-
-### 3. Aplique os manifests
-
-```bash
-# Infraestrutura compartilhada (PostgreSQL + RabbitMQ)
-kubectl apply -f k8s/infra/
-
-# Cada microsserviço
-kubectl apply -f k8s/users-api/
-kubectl apply -f k8s/catalog-api/
-kubectl apply -f k8s/payments-worker/
-kubectl apply -f k8s/notifications-worker/
-```
-
-### 4. Verifique o status
-
-```bash
-# Pods em execução
-kubectl get pods
-
-# Serviços expostos
-kubectl get services
-
-# Logs de um pod
-kubectl logs -f deployment/users-api
-```
-
-### 5. Acesse as APIs (port-forward)
-
-```bash
-kubectl port-forward service/users-api 8080:80
-kubectl port-forward service/catalog-api 8081:80
-```
-
----
-
-## Variáveis de Ambiente
-
-### Compartilhadas (todos os serviços)
-
-| Variável | Descrição |
-|---|---|
-| `RabbitMq__Host` | Host do RabbitMQ (`rabbitmq` no Docker Compose, `rabbitmq` no K8s) |
-| `RabbitMq__Username` | Usuário do RabbitMQ |
-| `RabbitMq__Password` | Senha do RabbitMQ |
-
-### UsersAPI e CatalogAPI
-
-| Variável | Descrição |
-|---|---|
-| `Jwt__SecretKey` | Chave secreta JWT compartilhada entre os dois serviços |
-| `Jwt__Issuer` | `FCG.UsersAPI` |
-| `Jwt__Audience` | `FCG.Client` |
-| `Jwt__ExpirationMinutes` | `60` |
-
-### Bancos de dados
-
-| Serviço | Variável | Banco |
-|---|---|---|
-| UsersAPI | `ConnectionStrings__Postgres` | `fcg_users_db` |
-| CatalogAPI | `ConnectionStrings__Postgres` | `fcg_catalog_db` |
-| PaymentsAPI | `ConnectionStrings__Postgres` | `fcg_payments_db` |
+> O `docker-compose.yml` usa `build: ../fcg-<servico>` para referenciar os Dockerfiles de cada serviço.
 
 ---
 
@@ -252,35 +143,389 @@ kubectl port-forward service/catalog-api 8081:80
 
 ```
 fcg-infra/
-├── docker-compose.yml          # Orquestração local completa
-├── .env.example                # Exemplo de variáveis de ambiente
+├── docker-compose.yml              # Orquestração local (6 serviços)
+├── .env.example                    # Variáveis de ambiente necessárias
 └── k8s/
-    ├── infra/
+    ├── infra/                      # Infraestrutura compartilhada no cluster
     │   ├── postgres-deployment.yaml
     │   ├── postgres-service.yaml
+    │   ├── postgres-secret.yaml
     │   ├── rabbitmq-deployment.yaml
-    │   └── rabbitmq-service.yaml
-    ├── users-api/
+    │   ├── rabbitmq-service.yaml
+    │   └── rabbitmq-secret.yaml
+    ├── users-api/                  # Manifests do UsersAPI
     │   ├── deployment.yaml
-    │   ├── service.yaml
+    │   ├── service.yaml            # ClusterIP port 80 → 8080
     │   ├── configmap.yaml
     │   └── secret.yaml
-    ├── catalog-api/
+    ├── catalog-api/                # Manifests do CatalogAPI
     │   ├── deployment.yaml
-    │   ├── service.yaml
+    │   ├── service.yaml            # ClusterIP port 80 → 8080
     │   ├── configmap.yaml
     │   └── secret.yaml
-    ├── payments-worker/
+    ├── payments-worker/            # Manifests do PaymentsAPI (Worker)
     │   ├── deployment.yaml
+    │   ├── service.yaml            # Headless (clusterIP: None)
     │   ├── configmap.yaml
     │   └── secret.yaml
-    └── notifications-worker/
+    └── notifications-worker/       # Manifests do NotificationsAPI (Worker)
         ├── deployment.yaml
-        └── configmap.yaml
+        ├── service.yaml            # Headless (clusterIP: None)
+        ├── configmap.yaml
+        └── secret.yaml
 ```
+
+---
+
+## Execução com Docker Compose
+
+### Passo 1 — Configure as variáveis de ambiente
+
+Copie o arquivo de exemplo e edite o valor do `JWT_SECRET`:
+
+```bash
+cd fcg-infra
+cp .env.example .env
+```
+
+Conteúdo do `.env`:
+
+```env
+# Chave JWT compartilhada entre UsersAPI e CatalogAPI
+# Gere uma nova com: openssl rand -base64 32
+JWT_SECRET=UvPTu5UZIcSe0V1onJSNTWT579OHlmoxXA1flLgKpow=
+
+# Senha do PostgreSQL (usuário: fcg)
+POSTGRES_PASSWORD=fcg_secret
+
+# Senha do RabbitMQ (usuário: guest)
+RABBITMQ_PASSWORD=guest
+```
+
+### Passo 2 — Suba todos os serviços
+
+```bash
+# Build + inicialização de todos os containers
+docker compose up -d --build
+
+# Verifique se todos estão Up
+docker compose ps
+```
+
+Resultado esperado (`docker compose ps`):
+
+| Container | Status | Ports |
+|---|---|---|
+| `fcg_postgres` | Up (healthy) | `0.0.0.0:5432->5432/tcp` |
+| `fcg_rabbitmq` | Up (healthy) | `0.0.0.0:5672->5672/tcp`, `0.0.0.0:15672->15672/tcp` |
+| `fcg_users_api` | Up | `0.0.0.0:8080->8080/tcp` |
+| `fcg_catalog_api` | Up | `0.0.0.0:8081->8080/tcp` |
+| `fcg_payments_worker` | Up | — |
+| `fcg_notifications_worker` | Up | — |
+
+> Os serviços de API aguardam o postgres e rabbitmq passarem no healthcheck antes de iniciar (`depends_on: condition: service_healthy`).
+
+### Passo 3 — Acesse os serviços
+
+| Interface | URL | Credenciais |
+|---|---|---|
+| UsersAPI Swagger | http://localhost:8080/swagger | — |
+| CatalogAPI Swagger | http://localhost:8081/swagger | JWT necessário |
+| RabbitMQ Management | http://localhost:15672 | `guest` / `guest` |
+
+### Passo 4 — Teste os fluxos
+
+**Fluxo de cadastro:**
+```bash
+# 1. Registrar usuário (deve disparar e-mail de boas-vindas no log do notifications-worker)
+curl -X POST http://localhost:8080/api/v1/users/register \
+  -H "Content-Type: application/json" \
+  -d '{"name":"João Silva","email":"joao@example.com","password":"Senha@123"}'
+
+# 2. Verificar log do notifications-worker
+docker compose logs notifications-worker | grep "EMAIL SIMULADO"
+```
+
+**Fluxo de compra:**
+```bash
+# 1. Fazer login e obter JWT
+TOKEN=$(curl -s -X POST http://localhost:8080/api/v1/auth/login \
+  -H "Content-Type: application/json" \
+  -d '{"email":"joao@example.com","password":"Senha@123"}' | jq -r '.token')
+
+# 2. Iniciar compra de jogo (retorna 202 Accepted)
+curl -X POST http://localhost:8081/api/v1/games/{id}/acquire \
+  -H "Authorization: Bearer $TOKEN"
+
+# 3. Verificar logs do pagamento e notificação
+docker compose logs payments-worker
+docker compose logs notifications-worker
+```
+
+### Passo 5 — Monitorar logs
+
+```bash
+# Todos os serviços simultaneamente
+docker compose logs -f
+
+# Serviço específico
+docker compose logs -f users-api
+docker compose logs -f catalog-api
+docker compose logs -f payments-worker
+docker compose logs -f notifications-worker
+```
+
+### Passo 6 — Encerrar
+
+```bash
+# Apenas parar os containers
+docker compose down
+
+# Parar e remover volumes (apaga os bancos de dados)
+docker compose down -v
+```
+
+---
+
+## Deploy no Kubernetes
+
+### Passo 1 — Habilite o Kubernetes local
+
+No **Docker Desktop**: Settings → Kubernetes → Enable Kubernetes → Apply & Restart.
+
+Para **Kind** ou **Minikube**, consulte a documentação oficial de cada ferramenta.
+
+Verifique que o cluster está ativo:
+```bash
+kubectl cluster-info
+kubectl get nodes
+```
+
+### Passo 2 — Build das imagens Docker locais
+
+Execute a partir da **pasta raiz** (onde estão todos os repositórios):
+
+```bash
+cd "FIAP - MS"
+
+docker build -t fcg-users-api:latest ./fcg-users-api
+docker build -t fcg-catalog-api:latest ./fcg-catalog-api
+docker build -t fcg-payments-api:latest ./fcg-payments-api
+docker build -t fcg-notifications-api:latest ./fcg-notifications-api
+```
+
+Confirme que as imagens foram criadas:
+```bash
+docker images | grep fcg
+```
+
+> Os manifests usam `imagePullPolicy: Never` para usar as imagens locais sem precisar de um registry remoto.
+
+### Passo 3 — Personalize os Secrets (opcional)
+
+Os arquivos `secret.yaml` usam `stringData` com valores padrão prontos para uso em ambiente de desenvolvimento. Para personalizar:
+
+```bash
+# Exemplo: gerar nova chave JWT
+openssl rand -base64 32
+```
+
+Edite os campos em:
+- `k8s/infra/postgres-secret.yaml` — credenciais do PostgreSQL
+- `k8s/infra/rabbitmq-secret.yaml` — credenciais do RabbitMQ
+- `k8s/users-api/secret.yaml` — connection string + JWT secret
+- `k8s/catalog-api/secret.yaml` — connection string + JWT secret (deve ser igual ao users-api)
+- `k8s/payments-worker/secret.yaml` — connection string
+- `k8s/notifications-worker/secret.yaml` — senha do RabbitMQ
+
+### Passo 4 — Aplique os manifests
+
+```bash
+cd fcg-infra
+
+# 1. Infraestrutura (PostgreSQL + RabbitMQ)
+kubectl apply -f k8s/infra/
+
+# 2. Microsserviços
+kubectl apply -f k8s/users-api/
+kubectl apply -f k8s/catalog-api/
+kubectl apply -f k8s/payments-worker/
+kubectl apply -f k8s/notifications-worker/
+```
+
+### Passo 5 — Verifique o status dos pods
+
+```bash
+# Listar todos os pods
+kubectl get pods
+
+# Listar todos os services
+kubectl get services
+
+# Aguardar todos os pods ficarem Ready
+kubectl wait --for=condition=ready pod --all --timeout=120s
+```
+
+Resultado esperado (`kubectl get pods`):
+
+```
+NAME                                    READY   STATUS    RESTARTS   AGE
+postgres-<hash>                         1/1     Running   0          2m
+rabbitmq-<hash>                         1/1     Running   0          2m
+users-api-<hash>                        1/1     Running   0          1m
+catalog-api-<hash>                      1/1     Running   0          1m
+payments-worker-<hash>                  1/1     Running   0          1m
+notifications-worker-<hash>             1/1     Running   0          1m
+```
+
+### Passo 6 — Acesse as APIs via port-forward
+
+```bash
+# Terminal 1 — UsersAPI
+kubectl port-forward service/users-api 8080:80
+
+# Terminal 2 — CatalogAPI
+kubectl port-forward service/catalog-api 8081:80
+
+# Terminal 3 — RabbitMQ Management (opcional)
+kubectl port-forward service/rabbitmq 15672:15672
+```
+
+Acesse:
+- UsersAPI Swagger: http://localhost:8080/swagger
+- CatalogAPI Swagger: http://localhost:8081/swagger
+- RabbitMQ Management: http://localhost:15672
+
+### Passo 7 — Monitore os logs no cluster
+
+```bash
+# Logs de um deployment
+kubectl logs -f deployment/users-api
+kubectl logs -f deployment/payments-worker
+kubectl logs -f deployment/notifications-worker
+
+# Descrever um pod (útil para debugar falhas de startup)
+kubectl describe pod <nome-do-pod>
+```
+
+### Passo 8 — Remover tudo do cluster
+
+```bash
+kubectl delete -f k8s/notifications-worker/
+kubectl delete -f k8s/payments-worker/
+kubectl delete -f k8s/catalog-api/
+kubectl delete -f k8s/users-api/
+kubectl delete -f k8s/infra/
+```
+
+---
+
+## Variáveis de Ambiente
+
+### UsersAPI
+
+| Variável | Exemplo | Origem |
+|---|---|---|
+| `ConnectionStrings__Postgres` | `Host=postgres;Port=5432;Database=fcg_users_db;Username=fcg;Password=fcg_secret` | Secret |
+| `Jwt__SecretKey` | `UvPTu5UZ...` | Secret |
+| `Jwt__Issuer` | `FCG.Api` | ConfigMap |
+| `Jwt__Audience` | `FCG.Client` | ConfigMap |
+| `Jwt__ExpirationMinutes` | `60` | ConfigMap |
+| `RabbitMq__Host` | `rabbitmq` | ConfigMap |
+| `RabbitMq__Username` | `guest` | ConfigMap |
+| `RabbitMq__Password` | `guest` | Secret |
+
+### CatalogAPI
+
+| Variável | Exemplo | Origem |
+|---|---|---|
+| `ConnectionStrings__Postgres` | `Host=postgres;Port=5432;Database=fcg_catalog_db;Username=fcg;Password=fcg_secret` | Secret |
+| `Jwt__SecretKey` | `UvPTu5UZ...` *(deve ser igual ao UsersAPI)* | Secret |
+| `Jwt__Issuer` | `FCG.UsersAPI` | ConfigMap |
+| `Jwt__Audience` | `FCG.Client` | ConfigMap |
+| `RabbitMq__Host` | `rabbitmq` | ConfigMap |
+| `RabbitMq__Username` | `guest` | ConfigMap |
+| `RabbitMq__Password` | `guest` | Secret |
+
+### PaymentsAPI (Worker)
+
+| Variável | Exemplo | Origem |
+|---|---|---|
+| `ConnectionStrings__Postgres` | `Host=postgres;Port=5432;Database=fcg_payments_db;Username=fcg;Password=fcg_secret` | Secret |
+| `RabbitMq__Host` | `rabbitmq` | ConfigMap |
+| `RabbitMq__Username` | `guest` | ConfigMap |
+| `RabbitMq__Password` | `guest` | Secret |
+
+### NotificationsAPI (Worker)
+
+| Variável | Exemplo | Origem |
+|---|---|---|
+| `RabbitMq__Host` | `rabbitmq` | ConfigMap |
+| `RabbitMq__Username` | `guest` | ConfigMap |
+| `RabbitMq__Password` | `guest` | Secret |
+
+> **Nota sobre JWT:** `Jwt__SecretKey` deve ser **idêntico** no UsersAPI e no CatalogAPI. O CatalogAPI valida tokens emitidos pelo UsersAPI usando a mesma chave.
+
+---
+
+## Endpoints das APIs
+
+### UsersAPI — `http://localhost:8080`
+
+| Método | Rota | Auth | Descrição |
+|---|---|---|---|
+| `POST` | `/api/v1/users/register` | Anônimo | Cadastra usuário + dispara e-mail de boas-vindas |
+| `POST` | `/api/v1/auth/login` | Anônimo | Autentica e retorna JWT |
+| `GET` | `/api/v1/users` | Admin | Lista todos os usuários |
+| `GET` | `/api/v1/users/{id}` | Admin | Busca usuário por ID |
+| `PATCH` | `/api/v1/users/{id}` | User/Admin | Atualiza dados do perfil |
+
+### CatalogAPI — `http://localhost:8081`
+
+| Método | Rota | Auth | Descrição |
+|---|---|---|---|
+| `GET` | `/api/v1/games` | User/Admin | Lista jogos do catálogo |
+| `GET` | `/api/v1/games/search` | User/Admin | Busca jogos com paginação |
+| `POST` | `/api/v1/games` | Admin | Cria novo jogo |
+| `PATCH` | `/api/v1/games/{id}` | Admin | Atualiza jogo |
+| `DELETE` | `/api/v1/games/{id}` | Admin | Remove jogo |
+| `POST` | `/api/v1/games/{id}/acquire` | User/Admin | Inicia fluxo de compra → retorna 202 |
+
+---
+
+## Troubleshooting
+
+### Container da API não sobe (exit code 1)
+O serviço aguarda postgres e rabbitmq ficarem `healthy`. Se demorar, verifique:
+```bash
+docker compose logs postgres
+docker compose logs rabbitmq
+```
+
+### Pod com status `CrashLoopBackOff`
+```bash
+kubectl describe pod <nome-do-pod>
+kubectl logs <nome-do-pod> --previous
+```
+Causas comuns: Secret com valor errado, imagem Docker não encontrada (`imagePullPolicy: Never` requer build local).
+
+### Migrations não executam no K8s
+Os serviços executam `MigrateAsync()` no startup. Se o postgres ainda não estiver pronto, o pod vai reiniciar. O `restartPolicy: Always` garante que ele tente novamente. Aguarde o pod estabilizar.
+
+### JWT inválido no CatalogAPI (`401 Unauthorized`)
+O `Jwt__SecretKey` nos secrets de `users-api` e `catalog-api` deve ser idêntico. Verifique:
+```bash
+kubectl get secret users-api-secret -o jsonpath='{.data.Jwt__SecretKey}' | base64 -d
+kubectl get secret catalog-api-secret -o jsonpath='{.data.Jwt__SecretKey}' | base64 -d
+```
+
+### RabbitMQ não recebe mensagens
+Acesse o Management UI (http://localhost:15672 ou via port-forward) e verifique se as filas `user.created`, `order.placed` e `payment.processed` estão criadas. As filas são criadas automaticamente pelo MassTransit na primeira conexão dos consumers.
 
 ---
 
 ## Grupo 14
 
-Projeto desenvolvido para a disciplina **Full Stack Developer** — FIAP.
+Projeto desenvolvido para o **Tech Challenge — Fase 2** da pós-graduação em **Full Stack Developer** — FIAP.
+
+**Tecnologias:** .NET 10 · ASP.NET Core · Entity Framework Core · PostgreSQL · RabbitMQ · MassTransit · Docker · Kubernetes

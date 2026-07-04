@@ -1,0 +1,8 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: payments-worker-config
+data:
+  RabbitMq__Host: "rabbitmq"
+  RabbitMq__Username: "guest"
+  DOTNET_ENVIRONMENT: "Production"

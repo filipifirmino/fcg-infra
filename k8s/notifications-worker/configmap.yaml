@@ -1,0 +1,10 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: notifications-worker-config
+  labels:
+    app: notifications-worker
+data:
+  RabbitMq__Host: "rabbitmq"
+  RabbitMq__Username: "guest"
+  Serilog__MinimumLevel__Default: "Information"

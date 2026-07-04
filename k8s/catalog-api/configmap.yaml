@@ -1,0 +1,11 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: catalog-api-config
+data:
+  Jwt__Issuer: "FCG.UsersAPI"
+  Jwt__Audience: "FCG.Client"
+  Jwt__ExpirationMinutes: "60"
+  RabbitMq__Host: "rabbitmq"
+  RabbitMq__Username: "guest"
+  ASPNETCORE_ENVIRONMENT: "Production"

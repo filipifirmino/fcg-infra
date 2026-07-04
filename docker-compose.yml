@@ -1,0 +1,116 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: fcg_postgres
+    environment:
+      POSTGRES_USER: fcg
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-fcg_secret}
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U fcg"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  rabbitmq:
+    image: rabbitmq:3-management-alpine
+    container_name: fcg_rabbitmq
+    ports:
+      - "5672:5672"
+      - "15672:15672"
+    environment:
+      RABBITMQ_DEFAULT_USER: guest
+      RABBITMQ_DEFAULT_PASS: ${RABBITMQ_PASSWORD:-guest}
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  users-api:
+    build:
+      context: ../fcg-users-api
+      dockerfile: Dockerfile
+    container_name: fcg_users_api
+    ports:
+      - "8080:8080"
+    environment:
+      ConnectionStrings__Postgres: "Host=postgres;Port=5432;Database=fcg_users_db;Username=fcg;Password=${POSTGRES_PASSWORD:-fcg_secret}"
+      Jwt__SecretKey: ${JWT_SECRET}
+      Jwt__Issuer: "FCG.Api"
+      Jwt__Audience: "FCG.Client"
+      Jwt__ExpirationMinutes: "60"
+      RabbitMq__Host: "rabbitmq"
+      RabbitMq__Username: "guest"
+      RabbitMq__Password: ${RABBITMQ_PASSWORD:-guest}
+      ASPNETCORE_ENVIRONMENT: "Production"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    restart: on-failure
+
+  catalog-api:
+    build:
+      context: ../fcg-catalog-api
+      dockerfile: Dockerfile
+    container_name: fcg_catalog_api
+    ports:
+      - "8081:8080"
+    environment:
+      ConnectionStrings__Postgres: "Host=postgres;Port=5432;Database=fcg_catalog_db;Username=fcg;Password=${POSTGRES_PASSWORD:-fcg_secret}"
+      Jwt__SecretKey: ${JWT_SECRET}
+      Jwt__Issuer: "FCG.UsersAPI"
+      Jwt__Audience: "FCG.Client"
+      RabbitMq__Host: "rabbitmq"
+      RabbitMq__Username: "guest"
+      RabbitMq__Password: ${RABBITMQ_PASSWORD:-guest}
+      ASPNETCORE_ENVIRONMENT: "Production"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    restart: on-failure
+
+  payments-worker:
+    build:
+      context: ../fcg-payments-api
+      dockerfile: Dockerfile
+    container_name: fcg_payments_worker
+    environment:
+      ConnectionStrings__Postgres: "Host=postgres;Port=5432;Database=fcg_payments_db;Username=fcg;Password=${POSTGRES_PASSWORD:-fcg_secret}"
+      RabbitMq__Host: "rabbitmq"
+      RabbitMq__Username: "guest"
+      RabbitMq__Password: ${RABBITMQ_PASSWORD:-guest}
+      DOTNET_ENVIRONMENT: "Production"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    restart: on-failure
+
+  notifications-worker:
+    build:
+      context: ../fcg-notifications-api
+      dockerfile: Dockerfile
+    container_name: fcg_notifications_worker
+    environment:
+      RabbitMq__Host: "rabbitmq"
+      RabbitMq__Username: "guest"
+      RabbitMq__Password: ${RABBITMQ_PASSWORD:-guest}
+      DOTNET_ENVIRONMENT: "Production"
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+    restart: on-failure
+
+volumes:
+  postgres_data:

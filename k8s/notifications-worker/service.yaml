@@ -1,0 +1,12 @@
+# Worker Service sem endpoints HTTP expostos.
+# Mantido para consistência dos manifests e para permitir health checks futuros.
+apiVersion: v1
+kind: Service
+metadata:
+  name: notifications-worker
+  labels:
+    app: notifications-worker
+spec:
+  selector:
+    app: notifications-worker
+  clusterIP: None
