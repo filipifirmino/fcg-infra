@@ -3,7 +3,7 @@ kind: ConfigMap
 metadata:
   name: catalog-api-config
 data:
-  Jwt__Issuer: "FCG.UsersAPI"
+  Jwt__Issuer: "FCG.Api"
   Jwt__Audience: "FCG.Client"
   Jwt__ExpirationMinutes: "60"
   RabbitMq__Host: "rabbitmq"

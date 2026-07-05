@@ -66,7 +66,7 @@ services:
     environment:
       ConnectionStrings__Postgres: "Host=postgres;Port=5432;Database=fcg_catalog_db;Username=fcg;Password=${POSTGRES_PASSWORD:-fcg_secret}"
       Jwt__SecretKey: ${JWT_SECRET}
-      Jwt__Issuer: "FCG.UsersAPI"
+      Jwt__Issuer: "FCG.Api"
       Jwt__Audience: "FCG.Client"
       RabbitMq__Host: "rabbitmq"
       RabbitMq__Username: "guest"
