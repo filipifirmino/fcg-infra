@@ -2,6 +2,7 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: postgres
+  namespace: fcg
 spec:
   replicas: 1
   selector:
@@ -45,6 +46,7 @@ apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
   name: postgres-pvc
+  namespace: fcg
 spec:
   accessModes:
     - ReadWriteOnce

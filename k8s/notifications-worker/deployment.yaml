@@ -2,6 +2,7 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: notifications-worker
+  namespace: fcg
   labels:
     app: notifications-worker
 spec:
@@ -27,10 +28,11 @@ spec:
               cpu: "500m"
           envFrom:
             - configMapRef:
+                name: fcg-shared-config
+            - secretRef:
+                name: fcg-shared-secret
+            - configMapRef:
                 name: notifications-worker-config
             - secretRef:
                 name: notifications-worker-secret
-          env:
-            - name: DOTNET_ENVIRONMENT
-              value: "Production"
       restartPolicy: Always

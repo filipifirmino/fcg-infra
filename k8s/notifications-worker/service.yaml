@@ -4,6 +4,7 @@ apiVersion: v1
 kind: Service
 metadata:
   name: notifications-worker
+  namespace: fcg
   labels:
     app: notifications-worker
 spec:

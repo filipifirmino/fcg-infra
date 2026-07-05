@@ -103,11 +103,14 @@ services:
       dockerfile: Dockerfile
     container_name: fcg_notifications_worker
     environment:
+      ConnectionStrings__Postgres: "Host=postgres;Port=5432;Database=fcg_notifications_db;Username=fcg;Password=${POSTGRES_PASSWORD:-fcg_secret}"
       RabbitMq__Host: "rabbitmq"
       RabbitMq__Username: "guest"
       RabbitMq__Password: ${RABBITMQ_PASSWORD:-guest}
       DOTNET_ENVIRONMENT: "Production"
     depends_on:
+      postgres:
+        condition: service_healthy
       rabbitmq:
         condition: service_healthy
     restart: on-failure

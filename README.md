@@ -307,7 +307,11 @@ Execute a partir da **pasta raiz** (onde estão todos os repositórios):
 
 ```bash
 cd "FIAP - MS"
+./fcg-infra/scripts/build-all.sh
+```
 
+Ou individualmente:
+```bash
 docker build -t fcg-users-api:latest ./fcg-users-api
 docker build -t fcg-catalog-api:latest ./fcg-catalog-api
 docker build -t fcg-payments-api:latest ./fcg-payments-api
@@ -330,23 +334,37 @@ Os arquivos `secret.yaml` usam `stringData` com valores padrão prontos para uso
 openssl rand -base64 32
 ```
 
-Edite os campos em:
+Configurações e segredos comuns a mais de um serviço (RabbitMQ host/usuário, JWT Issuer/Audience/SecretKey) ficam centralizados em `k8s/shared/`, para não divergir entre serviços. O que resta em cada pasta por serviço é só o que é exclusivo dele (normalmente a connection string do Postgres):
+
+- `k8s/shared/configmap.yaml` — `fcg-shared-config`: RabbitMq Host/Username, Jwt Issuer/Audience/ExpirationMinutes, ambiente
+- `k8s/shared/secret.yaml` — `fcg-shared-secret`: Jwt SecretKey, RabbitMq Password
 - `k8s/infra/postgres-secret.yaml` — credenciais do PostgreSQL
 - `k8s/infra/rabbitmq-secret.yaml` — credenciais do RabbitMQ
-- `k8s/users-api/secret.yaml` — connection string + JWT secret
-- `k8s/catalog-api/secret.yaml` — connection string + JWT secret (deve ser igual ao users-api)
-- `k8s/payments-worker/secret.yaml` — connection string
-- `k8s/notifications-worker/secret.yaml` — senha do RabbitMQ
+- `k8s/users-api/secret.yaml` — connection string do Postgres
+- `k8s/catalog-api/secret.yaml` — connection string do Postgres
+- `k8s/payments-worker/secret.yaml` — connection string do Postgres
+- `k8s/notifications-worker/secret.yaml` — connection string do Postgres
+- `k8s/notifications-worker/configmap.yaml` — nível de log específico do worker
+
+> Se trocar `fcg-shared-secret.Jwt__SecretKey`, o token emitido pelo UsersAPI só é aceito pelo CatalogAPI porque os dois leem a mesma chave via `envFrom` — não precisa (nem deve) duplicar o valor em outro lugar.
 
 ### Passo 4 — Aplique os manifests
+
+Todos os recursos são criados no namespace dedicado `fcg` (não em `default`).
 
 ```bash
 cd fcg-infra
 
+# 0. Namespace (precisa existir antes dos demais recursos)
+kubectl apply -f k8s/00-namespace.yaml
+
 # 1. Infraestrutura (PostgreSQL + RabbitMQ)
 kubectl apply -f k8s/infra/
 
-# 2. Microsserviços
+# 2. Configuração/segredos compartilhados (precisa existir antes dos serviços, que dependem dele via envFrom)
+kubectl apply -f k8s/shared/
+
+# 3. Microsserviços
 kubectl apply -f k8s/users-api/
 kubectl apply -f k8s/catalog-api/
 kubectl apply -f k8s/payments-worker/
@@ -356,14 +374,14 @@ kubectl apply -f k8s/notifications-worker/
 ### Passo 5 — Verifique o status dos pods
 
 ```bash
-# Listar todos os pods
-kubectl get pods
+# Listar todos os pods do namespace fcg
+kubectl get pods -n fcg
 
-# Listar todos os services
-kubectl get services
+# Listar todos os services do namespace fcg
+kubectl get services -n fcg
 
 # Aguardar todos os pods ficarem Ready
-kubectl wait --for=condition=ready pod --all --timeout=120s
+kubectl wait --for=condition=ready pod --all -n fcg --timeout=120s
 ```
 
 Resultado esperado (`kubectl get pods`):
@@ -509,6 +527,32 @@ kubectl logs <nome-do-pod> --previous
 ```
 Causas comuns: Secret com valor errado, imagem Docker não encontrada (`imagePullPolicy: Never` requer build local).
 
+### Pod com status `ErrImageNeverPull` mesmo após `docker build`
+Em versões recentes do Docker Desktop, o Kubernetes roda em **modo `kind`** (confirme com `docker desktop kubernetes status`) — o node do cluster usa um `containerd` próprio, separado do namespace de imagens (`moby`) usado pelo `docker build`/`docker images`. Ou seja, a imagem existe no seu Docker Engine, mas o `kubelet` não a enxerga.
+
+Sintoma: `kubectl describe pod <nome>` mostra `Container image "fcg-xxx-api:latest" is not present with pull policy of Never`, mesmo com `docker images` listando a imagem.
+
+Correções, da mais simples à mais manual:
+```bash
+# 1. Tente resetar o cluster Kubernetes do Docker Desktop primeiro
+#    (às vezes resincroniza o compartilhamento de imagens)
+docker desktop kubernetes reset-cluster
+
+# 2. Rebuilde as imagens e reaplique os manifests
+./fcg-infra/scripts/build-all.sh
+kubectl apply -f k8s/00-namespace.yaml
+kubectl apply -f k8s/infra/ && kubectl apply -f k8s/shared/
+kubectl apply -f k8s/users-api/ && kubectl apply -f k8s/catalog-api/ \
+  && kubectl apply -f k8s/payments-worker/ && kubectl apply -f k8s/notifications-worker/
+```
+
+Se persistir, importe a imagem manualmente para o namespace `k8s.io` do containerd do node:
+```bash
+kubectl debug node/<nome-do-node> --image=alpine:latest -it=false -- sleep 3600
+# pegue o nome do pod criado (node-debugger-...) e rode, para cada imagem:
+docker save fcg-users-api:latest | kubectl exec -i <pod-debug> -- chroot /host ctr -n k8s.io images import -
+```
+
 ### Migrations não executam no K8s
 Os serviços executam `MigrateAsync()` no startup. Se o postgres ainda não estiver pronto, o pod vai reiniciar. O `restartPolicy: Always` garante que ele tente novamente. Aguarde o pod estabilizar.
 
@@ -520,7 +564,7 @@ kubectl get secret catalog-api-secret -o jsonpath='{.data.Jwt__SecretKey}' | bas
 ```
 
 ### RabbitMQ não recebe mensagens
-Acesse o Management UI (http://localhost:15672 ou via port-forward) e verifique se as filas `user.created`, `order.placed` e `payment.processed` estão criadas. As filas são criadas automaticamente pelo MassTransit na primeira conexão dos consumers.
+Acesse o Management UI (http://localhost:15672 ou via port-forward) e verifique se as filas `UserCreated`, `OrderPlaced` e `PaymentProcessed` estão criadas, com pelo menos 1 consumer cada (`PaymentProcessed` deve ter 2: CatalogAPI e NotificationsAPI). As filas são criadas automaticamente pelo MassTransit na primeira conexão dos consumers.
 
 ---
 

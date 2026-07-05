@@ -1,7 +1,8 @@
 apiVersion: v1
 kind: ConfigMap
 metadata:
-  name: catalog-api-config
+  name: fcg-shared-config
+  namespace: fcg
 data:
   Jwt__Issuer: "FCG.Api"
   Jwt__Audience: "FCG.Client"
@@ -9,3 +10,4 @@ data:
   RabbitMq__Host: "rabbitmq"
   RabbitMq__Username: "guest"
   ASPNETCORE_ENVIRONMENT: "Production"
+  DOTNET_ENVIRONMENT: "Production"
