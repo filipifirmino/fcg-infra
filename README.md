@@ -86,26 +86,28 @@ A FCG é composta por **quatro microsserviços independentes** que se comunicam 
 ### Fluxo 1 — Cadastro de Usuário
 
 ```
-Cliente → POST /api/v1/users/register
+Cliente → POST /api/v1/User/register
     └─► UsersAPI cria usuário no banco
             └─► publica UserCreatedEvent
                     └─► NotificationsAPI consome
-                            └─► [EMAIL SIMULADO] log de boas-vindas
+                            └─► [EMAIL SIMULADO] log de boas-vindas + grava notification_logs
 ```
 
 ### Fluxo 2 — Compra de Jogo
 
 ```
 Cliente → POST /api/v1/games/{id}/acquire  (JWT obrigatório)
-    └─► CatalogAPI publica OrderPlacedEvent → retorna 202 Accepted
+    └─► CatalogAPI publica OrderPlacedEvent (UserId + UserEmail extraídos do JWT) → retorna 202 Accepted
             └─► PaymentsAPI consome OrderPlacedEvent
                     └─► Simula pagamento (90% aprovado / 10% rejeitado)
                             └─► publica PaymentProcessedEvent
-                                    ├─► CatalogAPI consome
+                                    ├─► CatalogAPI consome (fila catalog-api-payment-processed)
                                     │       └─► [Approved] adiciona jogo à biblioteca do usuário
-                                    └─► NotificationsAPI consome
-                                            └─► [Approved] [EMAIL SIMULADO] confirmação de compra
+                                    └─► NotificationsAPI consome (fila notifications-worker-payment-processed)
+                                            └─► [Approved] [EMAIL SIMULADO] confirmação de compra + grava notification_logs
 ```
+
+> **Contratos de evento (`FCG.Events`):** `UserCreatedEvent`, `OrderPlacedEvent` e `PaymentProcessedEvent` existem como cópias locais em cada repositório (sem pacote NuGet compartilhado, para preservar a autonomia de build de cada serviço), mas **todas declaram `namespace FCG.Events;`**. O MassTransit identifica o tipo de uma mensagem no wire pelo namespace + nome do tipo .NET — se um serviço usasse um namespace diferente para sua cópia, publisher e consumer não se reconheceriam como o mesmo evento, e a mensagem seria descartada silenciosamente (sem erro, sem exceção). Pelo mesmo motivo, `PaymentProcessedEvent` é consumido em **filas nomeadas explicitamente** por serviço (`catalog-api-payment-processed`, `notifications-worker-payment-processed`) em vez do nome padrão derivado da classe `PaymentProcessedConsumer` — as duas classes têm o mesmo nome em repositórios diferentes, e sem essa distinção os dois serviços cairiam na mesma fila física, competindo pela mensagem em vez de cada um receber sua cópia.
 
 ---
 
@@ -238,20 +240,25 @@ Resultado esperado (`docker compose ps`):
 **Fluxo de cadastro:**
 ```bash
 # 1. Registrar usuário (deve disparar e-mail de boas-vindas no log do notifications-worker)
-curl -X POST http://localhost:8080/api/v1/users/register \
+# Email e Password são Value Objects — o JSON precisa envolver o valor em { "value": "..." }
+curl -X POST http://localhost:8080/api/v1/User/register \
   -H "Content-Type: application/json" \
-  -d '{"name":"João Silva","email":"joao@example.com","password":"Senha@123"}'
+  -d '{"name":"João Silva","email":{"value":"joao@example.com"},"password":{"value":"Senha@123"}}'
 
 # 2. Verificar log do notifications-worker
 docker compose logs notifications-worker | grep "EMAIL SIMULADO"
+
+# 3. Conferir o registro persistido em notification_logs
+docker exec -it fcg_postgres psql -U fcg -d fcg_notifications_db \
+  -c "SELECT type, recipient, message FROM notification_logs ORDER BY sent_at DESC LIMIT 5;"
 ```
 
 **Fluxo de compra:**
 ```bash
 # 1. Fazer login e obter JWT
-TOKEN=$(curl -s -X POST http://localhost:8080/api/v1/auth/login \
+TOKEN=$(curl -s -X POST http://localhost:8080/api/v1/Auth/login \
   -H "Content-Type: application/json" \
-  -d '{"email":"joao@example.com","password":"Senha@123"}' | jq -r '.token')
+  -d '{"email":{"value":"joao@example.com"},"password":{"value":"Senha@123"}}' | jq -r '.data.token')
 
 # 2. Iniciar compra de jogo (retorna 202 Accepted)
 curl -X POST http://localhost:8081/api/v1/games/{id}/acquire \
@@ -478,9 +485,12 @@ kubectl delete -f k8s/infra/
 
 | Variável | Exemplo | Origem |
 |---|---|---|
+| `ConnectionStrings__Postgres` | `Host=postgres;Port=5432;Database=fcg_notifications_db;Username=fcg;Password=fcg_secret` | Secret |
 | `RabbitMq__Host` | `rabbitmq` | ConfigMap |
 | `RabbitMq__Username` | `guest` | ConfigMap |
 | `RabbitMq__Password` | `guest` | Secret |
+
+> Cada notificação simulada (boas-vindas, confirmação/rejeição de compra) é registrada na tabela `notification_logs` do banco `fcg_notifications_db`, além do log em console — útil para demonstrar o fluxo sem depender de captura de tela do terminal no timing certo.
 
 > **Nota sobre JWT:** `Jwt__SecretKey` deve ser **idêntico** no UsersAPI e no CatalogAPI. O CatalogAPI valida tokens emitidos pelo UsersAPI usando a mesma chave.
 
@@ -492,11 +502,13 @@ kubectl delete -f k8s/infra/
 
 | Método | Rota | Auth | Descrição |
 |---|---|---|---|
-| `POST` | `/api/v1/users/register` | Anônimo | Cadastra usuário + dispara e-mail de boas-vindas |
-| `POST` | `/api/v1/auth/login` | Anônimo | Autentica e retorna JWT |
-| `GET` | `/api/v1/users` | Admin | Lista todos os usuários |
-| `GET` | `/api/v1/users/{id}` | Admin | Busca usuário por ID |
-| `PATCH` | `/api/v1/users/{id}` | User/Admin | Atualiza dados do perfil |
+| `POST` | `/api/v1/User/register` | Anônimo | Cadastra usuário + dispara e-mail de boas-vindas |
+| `POST` | `/api/v1/Auth/login` | Anônimo | Autentica e retorna JWT |
+| `GET` | `/api/v1/User/get-all` | Admin | Lista todos os usuários |
+| `GET` | `/api/v1/User/get-by-id` | Admin | Busca usuário por ID |
+| `PATCH` | `/api/v1/User/update-by-id` | User/Admin | Atualiza dados do perfil |
+
+> `Email` e `Password` são Value Objects — o corpo de `register`/`login` precisa envolver o valor: `{ "email": { "value": "..." }, "password": { "value": "..." } }`.
 
 ### CatalogAPI — `http://localhost:8081`
 
