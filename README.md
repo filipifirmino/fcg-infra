@@ -12,9 +12,11 @@ Repositório de orquestração da plataforma **FIAP Cloud Games (FCG)**. Central
 - [Estrutura do Repositório](#estrutura-do-repositório)
 - [Execução com Docker Compose](#execução-com-docker-compose)
 - [Deploy no Kubernetes](#deploy-no-kubernetes)
+- [Hierarquia de Configuração e Secrets](#hierarquia-de-configuração-e-secrets)
 - [Variáveis de Ambiente](#variáveis-de-ambiente)
 - [Endpoints das APIs](#endpoints-das-apis)
 - [Troubleshooting](#troubleshooting)
+- [Documentação Detalhada dos Serviços](#documentação-detalhada-dos-serviços)
 
 ---
 
@@ -23,7 +25,7 @@ Repositório de orquestração da plataforma **FIAP Cloud Games (FCG)**. Central
 A FCG é composta por **quatro microsserviços independentes** que se comunicam de forma assíncrona via **RabbitMQ + MassTransit**. Cada serviço tem seu próprio repositório, banco de dados e ciclo de vida.
 
 | Microsserviço | Repositório | Tipo | Porta (host) |
-|---|---|---|---|
+| :--- | :--- | :--- | :--- |
 | UsersAPI | `fcg-users-api` | Web API | `8080` |
 | CatalogAPI | `fcg-catalog-api` | Web API | `8081` |
 | PaymentsAPI | `fcg-payments-api` | Worker Service | — |
@@ -32,7 +34,7 @@ A FCG é composta por **quatro microsserviços independentes** que se comunicam 
 **Infraestrutura compartilhada:**
 
 | Serviço | Porta (host) | Finalidade |
-|---|---|---|
+| :--- | :--- | :--- |
 | PostgreSQL 16 | `5432` | Banco de dados (1 DB por serviço, 1 instância) |
 | RabbitMQ 3 | `5672` / `15672` | Broker de mensagens / Management UI |
 
@@ -40,7 +42,7 @@ A FCG é composta por **quatro microsserviços independentes** que se comunicam 
 
 ## Arquitetura e Fluxo de Eventos
 
-```
+```text
 ┌─────────────────────────────────────────────────────────────────────┐
 │                         KUBERNETES CLUSTER                          │
 │                                                                     │
@@ -85,7 +87,7 @@ A FCG é composta por **quatro microsserviços independentes** que se comunicam 
 
 ### Fluxo 1 — Cadastro de Usuário
 
-```
+```text
 Cliente → POST /api/v1/User/register
     └─► UsersAPI cria usuário no banco
             └─► publica UserCreatedEvent
@@ -95,7 +97,7 @@ Cliente → POST /api/v1/User/register
 
 ### Fluxo 2 — Compra de Jogo
 
-```
+```text
 Cliente → POST /api/v1/games/{id}/acquire  (JWT obrigatório)
     └─► CatalogAPI publica OrderPlacedEvent (UserId + UserEmail extraídos do JWT) → retorna 202 Accepted
             └─► PaymentsAPI consome OrderPlacedEvent
@@ -114,7 +116,7 @@ Cliente → POST /api/v1/games/{id}/acquire  (JWT obrigatório)
 ## Pré-requisitos
 
 | Ferramenta | Versão mínima | Instalação |
-|---|---|---|
+| :--- | :--- | :--- |
 | Docker Desktop | 4.x | [docker.com](https://www.docker.com/products/docker-desktop/) |
 | Docker Compose | v2 (incluso no Desktop) | — |
 | kubectl | 1.28+ | [kubernetes.io/docs/tasks/tools](https://kubernetes.io/docs/tasks/tools/) |
@@ -125,7 +127,7 @@ Cliente → POST /api/v1/games/{id}/acquire  (JWT obrigatório)
 
 Todos os repositórios devem estar clonados **na mesma pasta raiz**:
 
-```
+```text
 FIAP - MS/              ← pasta raiz
 ├── fcg-users-api/
 ├── fcg-catalog-api/
@@ -143,7 +145,7 @@ FIAP - MS/              ← pasta raiz
 
 ## Estrutura do Repositório
 
-```
+```text
 fcg-infra/
 ├── docker-compose.yml              # Orquestração local (6 serviços)
 ├── .env.example                    # Variáveis de ambiente necessárias
@@ -217,7 +219,7 @@ docker compose ps
 Resultado esperado (`docker compose ps`):
 
 | Container | Status | Ports |
-|---|---|---|
+| :--- | :--- | :--- |
 | `fcg_postgres` | Up (healthy) | `0.0.0.0:5432->5432/tcp` |
 | `fcg_rabbitmq` | Up (healthy) | `0.0.0.0:5672->5672/tcp`, `0.0.0.0:15672->15672/tcp` |
 | `fcg_users_api` | Up | `0.0.0.0:8080->8080/tcp` |
@@ -230,10 +232,10 @@ Resultado esperado (`docker compose ps`):
 ### Passo 3 — Acesse os serviços
 
 | Interface | URL | Credenciais |
-|---|---|---|
-| UsersAPI Swagger | http://localhost:8080/swagger | — |
-| CatalogAPI Swagger | http://localhost:8081/swagger | JWT necessário |
-| RabbitMQ Management | http://localhost:15672 | `guest` / `guest` |
+| :--- | :--- | :--- |
+| UsersAPI Swagger | `http://localhost:8080/swagger` | — |
+| CatalogAPI Swagger | `http://localhost:8081/swagger` | JWT necessário |
+| RabbitMQ Management | `http://localhost:15672` | `guest` / `guest` |
 
 ### Passo 4 — Teste os fluxos
 
@@ -332,32 +334,9 @@ docker images | grep fcg
 
 > Os manifests usam `imagePullPolicy: Never` para usar as imagens locais sem precisar de um registry remoto.
 
-### Passo 3 — Personalize os Secrets (opcional)
+### Passo 3 — Ordem de Aplicação (Crítico)
 
-Os arquivos `secret.yaml` usam `stringData` com valores padrão prontos para uso em ambiente de desenvolvimento. Para personalizar:
-
-```bash
-# Exemplo: gerar nova chave JWT
-openssl rand -base64 32
-```
-
-Configurações e segredos comuns a mais de um serviço (RabbitMQ host/usuário, JWT Issuer/Audience/SecretKey) ficam centralizados em `k8s/shared/`, para não divergir entre serviços. O que resta em cada pasta por serviço é só o que é exclusivo dele (normalmente a connection string do Postgres):
-
-- `k8s/shared/configmap.yaml` — `fcg-shared-config`: RabbitMq Host/Username, Jwt Issuer/Audience/ExpirationMinutes, ambiente
-- `k8s/shared/secret.yaml` — `fcg-shared-secret`: Jwt SecretKey, RabbitMq Password
-- `k8s/infra/postgres-secret.yaml` — credenciais do PostgreSQL
-- `k8s/infra/rabbitmq-secret.yaml` — credenciais do RabbitMQ
-- `k8s/users-api/secret.yaml` — connection string do Postgres
-- `k8s/catalog-api/secret.yaml` — connection string do Postgres
-- `k8s/payments-worker/secret.yaml` — connection string do Postgres
-- `k8s/notifications-worker/secret.yaml` — connection string do Postgres
-- `k8s/notifications-worker/configmap.yaml` — nível de log específico do worker
-
-> Se trocar `fcg-shared-secret.Jwt__SecretKey`, o token emitido pelo UsersAPI só é aceito pelo CatalogAPI porque os dois leem a mesma chave via `envFrom` — não precisa (nem deve) duplicar o valor em outro lugar.
-
-### Passo 4 — Aplique os manifests
-
-Todos os recursos são criados no namespace dedicado `fcg` (não em `default`).
+Para garantir que a infraestrutura e os segredos estejam prontos antes das aplicações, aplique os manifests **exatamente** nesta ordem (todos criados no namespace `fcg`):
 
 ```bash
 cd fcg-infra
@@ -368,7 +347,7 @@ kubectl apply -f k8s/00-namespace.yaml
 # 1. Infraestrutura (PostgreSQL + RabbitMQ)
 kubectl apply -f k8s/infra/
 
-# 2. Configuração/segredos compartilhados (precisa existir antes dos serviços, que dependem dele via envFrom)
+# 2. Configuração/segredos compartilhados
 kubectl apply -f k8s/shared/
 
 # 3. Microsserviços
@@ -378,7 +357,7 @@ kubectl apply -f k8s/payments-worker/
 kubectl apply -f k8s/notifications-worker/
 ```
 
-### Passo 5 — Verifique o status dos pods
+### Passo 4 — Verifique o status dos pods
 
 ```bash
 # Listar todos os pods do namespace fcg
@@ -393,7 +372,7 @@ kubectl wait --for=condition=ready pod --all -n fcg --timeout=120s
 
 Resultado esperado (`kubectl get pods`):
 
-```
+```text
 NAME                                    READY   STATUS    RESTARTS   AGE
 postgres-<hash>                         1/1     Running   0          2m
 rabbitmq-<hash>                         1/1     Running   0          2m
@@ -403,7 +382,7 @@ payments-worker-<hash>                  1/1     Running   0          1m
 notifications-worker-<hash>             1/1     Running   0          1m
 ```
 
-### Passo 6 — Acesse as APIs via port-forward
+### Passo 5 — Acesse as APIs via port-forward
 
 ```bash
 # Terminal 1 — UsersAPI
@@ -417,11 +396,11 @@ kubectl port-forward service/rabbitmq 15672:15672
 ```
 
 Acesse:
-- UsersAPI Swagger: http://localhost:8080/swagger
-- CatalogAPI Swagger: http://localhost:8081/swagger
-- RabbitMQ Management: http://localhost:15672
+- UsersAPI Swagger: `http://localhost:8080/swagger`
+- CatalogAPI Swagger: `http://localhost:8081/swagger`
+- RabbitMQ Management: `http://localhost:15672`
 
-### Passo 7 — Monitore os logs no cluster
+### Passo 6 — Monitore os logs no cluster
 
 ```bash
 # Logs de um deployment
@@ -433,15 +412,27 @@ kubectl logs -f deployment/notifications-worker
 kubectl describe pod <nome-do-pod>
 ```
 
-### Passo 8 — Remover tudo do cluster
+### Passo 7 — Remover tudo do cluster
 
 ```bash
 kubectl delete -f k8s/notifications-worker/
 kubectl delete -f k8s/payments-worker/
 kubectl delete -f k8s/catalog-api/
 kubectl delete -f k8s/users-api/
+kubectl delete -f k8s/shared/
 kubectl delete -f k8s/infra/
 ```
+
+---
+
+## Hierarquia de Configuração e Secrets
+
+Para evitar divergências, os arquivos `secret.yaml` e `configmap.yaml` adotam uma estrutura hierárquica:
+
+*   **Shared (`k8s/shared/`):** Contém configurações e segredos comuns a mais de um serviço (RabbitMQ host/usuário, JWT Issuer/Audience/SecretKey). O que estiver aqui **deve ser idêntico** entre os serviços (ex: se trocar o `Jwt__SecretKey` aqui, o token emitido pelo UsersAPI e validado pelo CatalogAPI continuarão funcionando, pois ambos leem do mesmo lugar).
+*   **Service Specific (`k8s/<servico>/`):** O que resta em cada pasta por serviço é só o que é exclusivo dele (normalmente a connection string do Postgres).
+
+> **Segurança:** Nunca comite arquivos com valores reais em `k8s/secret.yaml` ou `.env`. Use os templates fornecidos e substitua localmente (ex: gere um novo JWT com `openssl rand -base64 32`).
 
 ---
 
@@ -450,49 +441,47 @@ kubectl delete -f k8s/infra/
 ### UsersAPI
 
 | Variável | Exemplo | Origem |
-|---|---|---|
+| :--- | :--- | :--- |
 | `ConnectionStrings__Postgres` | `Host=postgres;Port=5432;Database=fcg_users_db;Username=fcg;Password=fcg_secret` | Secret |
-| `Jwt__SecretKey` | `UvPTu5UZ...` | Secret |
-| `Jwt__Issuer` | `FCG.Api` | ConfigMap |
-| `Jwt__Audience` | `FCG.Client` | ConfigMap |
-| `Jwt__ExpirationMinutes` | `60` | ConfigMap |
-| `RabbitMq__Host` | `rabbitmq` | ConfigMap |
-| `RabbitMq__Username` | `guest` | ConfigMap |
-| `RabbitMq__Password` | `guest` | Secret |
+| `Jwt__SecretKey` | `UvPTu5UZ...` | Secret (Shared) |
+| `Jwt__Issuer` | `FCG.Api` | ConfigMap (Shared) |
+| `Jwt__Audience` | `FCG.Client` | ConfigMap (Shared) |
+| `Jwt__ExpirationMinutes` | `60` | ConfigMap (Shared) |
+| `RabbitMq__Host` | `rabbitmq` | ConfigMap (Shared) |
+| `RabbitMq__Username` | `guest` | ConfigMap (Shared) |
+| `RabbitMq__Password` | `guest` | Secret (Shared) |
 
 ### CatalogAPI
 
 | Variável | Exemplo | Origem |
-|---|---|---|
+| :--- | :--- | :--- |
 | `ConnectionStrings__Postgres` | `Host=postgres;Port=5432;Database=fcg_catalog_db;Username=fcg;Password=fcg_secret` | Secret |
-| `Jwt__SecretKey` | `UvPTu5UZ...` *(deve ser igual ao UsersAPI)* | Secret |
-| `Jwt__Issuer` | `FCG.UsersAPI` | ConfigMap |
-| `Jwt__Audience` | `FCG.Client` | ConfigMap |
-| `RabbitMq__Host` | `rabbitmq` | ConfigMap |
-| `RabbitMq__Username` | `guest` | ConfigMap |
-| `RabbitMq__Password` | `guest` | Secret |
+| `Jwt__SecretKey` | `UvPTu5UZ...` | Secret (Shared) |
+| `Jwt__Issuer` | `FCG.UsersAPI` | ConfigMap (Shared) |
+| `Jwt__Audience` | `FCG.Client` | ConfigMap (Shared) |
+| `RabbitMq__Host` | `rabbitmq` | ConfigMap (Shared) |
+| `RabbitMq__Username` | `guest` | ConfigMap (Shared) |
+| `RabbitMq__Password` | `guest` | Secret (Shared) |
 
 ### PaymentsAPI (Worker)
 
 | Variável | Exemplo | Origem |
-|---|---|---|
+| :--- | :--- | :--- |
 | `ConnectionStrings__Postgres` | `Host=postgres;Port=5432;Database=fcg_payments_db;Username=fcg;Password=fcg_secret` | Secret |
-| `RabbitMq__Host` | `rabbitmq` | ConfigMap |
-| `RabbitMq__Username` | `guest` | ConfigMap |
-| `RabbitMq__Password` | `guest` | Secret |
+| `RabbitMq__Host` | `rabbitmq` | ConfigMap (Shared) |
+| `RabbitMq__Username` | `guest` | ConfigMap (Shared) |
+| `RabbitMq__Password` | `guest` | Secret (Shared) |
 
 ### NotificationsAPI (Worker)
 
 | Variável | Exemplo | Origem |
-|---|---|---|
+| :--- | :--- | :--- |
 | `ConnectionStrings__Postgres` | `Host=postgres;Port=5432;Database=fcg_notifications_db;Username=fcg;Password=fcg_secret` | Secret |
-| `RabbitMq__Host` | `rabbitmq` | ConfigMap |
-| `RabbitMq__Username` | `guest` | ConfigMap |
-| `RabbitMq__Password` | `guest` | Secret |
+| `RabbitMq__Host` | `rabbitmq` | ConfigMap (Shared) |
+| `RabbitMq__Username` | `guest` | ConfigMap (Shared) |
+| `RabbitMq__Password` | `guest` | Secret (Shared) |
 
 > Cada notificação simulada (boas-vindas, confirmação/rejeição de compra) é registrada na tabela `notification_logs` do banco `fcg_notifications_db`, além do log em console — útil para demonstrar o fluxo sem depender de captura de tela do terminal no timing certo.
-
-> **Nota sobre JWT:** `Jwt__SecretKey` deve ser **idêntico** no UsersAPI e no CatalogAPI. O CatalogAPI valida tokens emitidos pelo UsersAPI usando a mesma chave.
 
 ---
 
@@ -501,7 +490,7 @@ kubectl delete -f k8s/infra/
 ### UsersAPI — `http://localhost:8080`
 
 | Método | Rota | Auth | Descrição |
-|---|---|---|---|
+| :--- | :--- | :--- | :--- |
 | `POST` | `/api/v1/User/register` | Anônimo | Cadastra usuário + dispara e-mail de boas-vindas |
 | `POST` | `/api/v1/Auth/login` | Anônimo | Autentica e retorna JWT |
 | `GET` | `/api/v1/User/get-all` | Admin | Lista todos os usuários |
@@ -513,7 +502,7 @@ kubectl delete -f k8s/infra/
 ### CatalogAPI — `http://localhost:8081`
 
 | Método | Rota | Auth | Descrição |
-|---|---|---|---|
+| :--- | :--- | :--- | :--- |
 | `GET` | `/api/v1/games` | User/Admin | Lista jogos do catálogo |
 | `GET` | `/api/v1/games/search` | User/Admin | Busca jogos com paginação |
 | `POST` | `/api/v1/games` | Admin | Cria novo jogo |
@@ -532,22 +521,22 @@ docker compose logs postgres
 docker compose logs rabbitmq
 ```
 
-### Pod com status `CrashLoopBackOff`
+### A regra de ouro das dependências (K8s)
+Se os pods de API ficarem em `CrashLoopBackOff` na inicialização, não se preocupe: eles possuem `restartPolicy: Always` e aguardam a infraestrutura. Se o problema persistir:
 ```bash
 kubectl describe pod <nome-do-pod>
 kubectl logs <nome-do-pod> --previous
 ```
-Causas comuns: Secret com valor errado, imagem Docker não encontrada (`imagePullPolicy: Never` requer build local).
+*Causas comuns: Secret com valor errado, imagem Docker não encontrada (`imagePullPolicy: Never` requer build local).*
 
 ### Pod com status `ErrImageNeverPull` mesmo após `docker build`
 Em versões recentes do Docker Desktop, o Kubernetes roda em **modo `kind`** (confirme com `docker desktop kubernetes status`) — o node do cluster usa um `containerd` próprio, separado do namespace de imagens (`moby`) usado pelo `docker build`/`docker images`. Ou seja, a imagem existe no seu Docker Engine, mas o `kubelet` não a enxerga.
 
-Sintoma: `kubectl describe pod <nome>` mostra `Container image "fcg-xxx-api:latest" is not present with pull policy of Never`, mesmo com `docker images` listando a imagem.
+Sintoma: `kubectl describe pod <nome>` mostra `Container image "fcg-xxx-api:latest" is not present with pull policy of Never`.
 
 Correções, da mais simples à mais manual:
 ```bash
 # 1. Tente resetar o cluster Kubernetes do Docker Desktop primeiro
-#    (às vezes resincroniza o compartilhamento de imagens)
 docker desktop kubernetes reset-cluster
 
 # 2. Rebuilde as imagens e reaplique os manifests
@@ -571,12 +560,22 @@ Os serviços executam `MigrateAsync()` no startup. Se o postgres ainda não esti
 ### JWT inválido no CatalogAPI (`401 Unauthorized`)
 O `Jwt__SecretKey` nos secrets de `users-api` e `catalog-api` deve ser idêntico. Verifique:
 ```bash
-kubectl get secret users-api-secret -o jsonpath='{.data.Jwt__SecretKey}' | base64 -d
-kubectl get secret catalog-api-secret -o jsonpath='{.data.Jwt__SecretKey}' | base64 -d
+kubectl get secret fcg-shared-secret -n fcg -o jsonpath='{.data.Jwt__SecretKey}' | base64 -d
 ```
 
 ### RabbitMQ não recebe mensagens
-Acesse o Management UI (http://localhost:15672 ou via port-forward) e verifique se as filas `UserCreated`, `OrderPlaced` e `PaymentProcessed` estão criadas, com pelo menos 1 consumer cada (`PaymentProcessed` deve ter 2: CatalogAPI e NotificationsAPI). As filas são criadas automaticamente pelo MassTransit na primeira conexão dos consumers.
+Acesse o Management UI (`http://localhost:15672` ou via port-forward) e verifique se as filas `UserCreated`, `OrderPlaced` e `PaymentProcessed` estão criadas, com pelo menos 1 consumer cada (`PaymentProcessed` deve ter 2: CatalogAPI e NotificationsAPI). As filas são criadas automaticamente pelo MassTransit na primeira conexão dos consumers.
+
+---
+
+## Documentação Detalhada dos Serviços
+
+Para detalhes específicos sobre a lógica de domínio, padrões arquiteturais e suíte de testes de cada serviço, consulte a documentação dedicada nos respectivos repositórios no GitHub:
+
+- [Users API](https://github.com/filipifirmino/fcg-users-api)
+- [Catalog API](https://github.com/filipifirmino/fcg-catalog-api)
+- [Payments Worker](https://github.com/filipifirmino/fcg-payments-api)
+- [Notifications Worker](https://github.com/filipifirmino/fcg-notifications-api)
 
 ---
 
