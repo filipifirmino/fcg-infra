@@ -1,0 +1,14 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "SendToNotificationQueues",
+      "Effect": "Allow",
+      "Action": "sqs:SendMessage",
+      "Resource": [
+        "arn:aws:sqs:us-east-1:122102659912:fcg-user-created",
+        "arn:aws:sqs:us-east-1:122102659912:fcg-payment-processed"
+      ]
+    }
+  ]
+}

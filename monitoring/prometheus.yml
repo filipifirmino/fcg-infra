@@ -1,0 +1,13 @@
+global:
+  scrape_interval: 15s
+
+scrape_configs:
+  - job_name: users-api
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["users-api:8080"]
+
+  - job_name: catalog-api
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["catalog-api:8080"]

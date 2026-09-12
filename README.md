@@ -2,6 +2,8 @@
 
 Repositório de orquestração da plataforma **FIAP Cloud Games (FCG)**. Centraliza o `docker-compose.yml` para execução local completa e todos os manifests Kubernetes para deploy em cluster. Não contém código de aplicação.
 
+> **Tech Challenge Fase 3:** este README documenta a arquitetura já com API Gateway (Kong), a migração da NotificationsAPI para Serverless (AWS Lambda), a stack de observabilidade (**Opção A: Prometheus + Grafana**) e a persistência poliglota (Redis + DynamoDB).
+
 ---
 
 ## Sumário
@@ -12,9 +14,11 @@ Repositório de orquestração da plataforma **FIAP Cloud Games (FCG)**. Central
 - [Estrutura do Repositório](#estrutura-do-repositório)
 - [Execução com Docker Compose](#execução-com-docker-compose)
 - [Deploy no Kubernetes](#deploy-no-kubernetes)
+- [Observabilidade](#observabilidade)
+- [Persistência Poliglota](#persistência-poliglota)
 - [Hierarquia de Configuração e Secrets](#hierarquia-de-configuração-e-secrets)
 - [Variáveis de Ambiente](#variáveis-de-ambiente)
-- [Endpoints das APIs](#endpoints-das-apis)
+- [Endpoints (via Kong)](#endpoints-via-kong)
 - [Troubleshooting](#troubleshooting)
 - [Documentação Detalhada dos Serviços](#documentação-detalhada-dos-serviços)
 
@@ -22,120 +26,156 @@ Repositório de orquestração da plataforma **FIAP Cloud Games (FCG)**. Central
 
 ## Visão Geral
 
-A FCG é composta por **quatro microsserviços independentes** que se comunicam de forma assíncrona via **RabbitMQ + MassTransit**. Cada serviço tem seu próprio repositório, banco de dados e ciclo de vida.
+A FCG é composta por microsserviços independentes por trás de um **API Gateway (Kong)**, comunicando-se de forma assíncrona via **RabbitMQ + MassTransit**, com uma função **Serverless (AWS Lambda)** substituindo o antigo worker de notificações. Cada serviço tem seu próprio repositório, banco de dados e ciclo de vida.
 
-| Microsserviço | Repositório | Tipo | Porta (host) |
-| :--- | :--- | :--- | :--- |
-| UsersAPI | `fcg-users-api` | Web API | `8080` |
-| CatalogAPI | `fcg-catalog-api` | Web API | `8081` |
-| PaymentsAPI | `fcg-payments-api` | Worker Service | — |
-| NotificationsAPI | `fcg-notifications-api` | Worker Service | — |
+| Componente | Repositório | Tipo | Onde roda |
+|---|---|---|---|
+| Kong | `fcg-infra` (`k8s/kong/`) | API Gateway | Kubernetes local |
+| UsersAPI | `fcg-users-api` | Web API | Kubernetes local |
+| CatalogAPI | `fcg-catalog-api` | Web API | Kubernetes local |
+| PaymentsAPI | `fcg-payments-api` | Worker Service | Kubernetes local |
+| Notifications | `fcg-notifications-serverless` | Função Lambda | **AWS real** |
+| ~~NotificationsAPI~~ | `fcg-notifications-api` | ~~Worker Service~~ | **Descomissionado na Fase 3** — substituído pela Lambda acima |
 
-**Infraestrutura compartilhada:**
+**Infraestrutura compartilhada (Kubernetes local):**
 
-| Serviço | Porta (host) | Finalidade |
-| :--- | :--- | :--- |
-| PostgreSQL 16 | `5432` | Banco de dados (1 DB por serviço, 1 instância) |
-| RabbitMQ 3 | `5672` / `15672` | Broker de mensagens / Management UI |
+| Serviço | Porta | Finalidade |
+|---|---|---|
+| Kong | `8000` (proxy) / `8001` (admin) | Ponto de entrada único, validação de JWT, roteamento |
+| PostgreSQL 16 | `5432` | Banco relacional (1 DB por serviço, 1 instância) |
+| RabbitMQ 3 | `5672` / `15672` | Broker de mensagens entre os microsserviços |
+| Redis 7 | `6379` | Cache distribuído (listagem de jogos do CatalogAPI) |
+| Prometheus | `9090` | Coleta de métricas |
+| Grafana | `3000` | Dashboards |
+
+**Infraestrutura na AWS (região `us-east-1`), provisionada pelo `fcg-notifications-serverless`:**
+
+| Recurso | Nome | Finalidade |
+|---|---|---|
+| SQS | `fcg-user-created` | Aciona a Lambda quando um usuário se cadastra |
+| SQS | `fcg-payment-processed` | Aciona a Lambda quando um pagamento é processado |
+| Lambda | `fcg-notifications-function` | Processa as notificações (antigo NotificationsAPI) |
+| DynamoDB | `fcg-notification-logs` | Persiste o histórico de notificações enviadas |
 
 ---
 
 ## Arquitetura e Fluxo de Eventos
 
-```text
-┌─────────────────────────────────────────────────────────────────────┐
-│                         KUBERNETES CLUSTER                          │
-│                                                                     │
-│  ┌──────────────┐    ┌──────────────┐    ┌───────────────────────┐  │
-│  │  UsersAPI    │    │  CatalogAPI  │    │     PaymentsAPI       │  │
-│  │  port: 8080  │    │  port: 8081  │    │   (Worker — sem HTTP) │  │
-│  │              │    │              │    │                       │  │
-│  │ POST /register│   │ GET  /games  │    │  Consome:             │  │
-│  │ POST /login  │    │ POST /games  │    │    OrderPlacedEvent   │  │
-│  │ GET  /users  │    │ PATCH /games │    │  Publica:             │  │
-│  │ PATCH /users │    │ DELETE /games│    │    PaymentProcessed   │  │
-│  │              │    │ POST /acquire│    │    Event              │  │
-│  └──────┬───────┘    └──────┬───────┘    └──────────┬────────────┘  │
-│         │                   │                        │              │
-│  UserCreatedEvent     OrderPlacedEvent         PaymentProcessedEvent│
-│         │                   │                        │              │
-│         └───────────────────┴────────────────────────┘              │
-│                             │                                       │
-│                    ┌────────▼────────┐                              │
-│                    │    RabbitMQ     │                              │
-│                    │  amqp: 5672     │                              │
-│                    │  mgmt: 15672    │                              │
-│                    └────────┬────────┘                              │
-│                             │                                       │
-│                   ┌─────────▼──────────┐                            │
-│                   │  NotificationsAPI  │                            │
-│                   │  (Worker — sem HTTP│                            │
-│                   │                   │                            │
-│                   │  Consome:         │                            │
-│                   │    UserCreated    │                            │
-│                   │    PaymentProc.   │                            │
-│                   └───────────────────┘                            │
-│                                                                     │
-│  ┌─────────────────────────────────────────────────────────────┐   │
-│  │  PostgreSQL  (postgres:5432)                                │   │
-│  │  ├── fcg_users_db    (UsersAPI)                             │   │
-│  │  ├── fcg_catalog_db  (CatalogAPI)                           │   │
-│  │  └── fcg_payments_db (PaymentsAPI)                          │   │
-│  └─────────────────────────────────────────────────────────────┘   │
-└─────────────────────────────────────────────────────────────────────┘
+```
+                              ┌──────────┐
+  Cliente ──────────────────► │   KONG   │  :8000 (proxy) / :8001 (admin)
+                              │ (JWT +   │
+                              │ routing) │
+                              └────┬─────┘
+                                   │
+                 ┌─────────────────┼──────────────────┐
+                 ▼                                     ▼
+         ┌──────────────┐                      ┌──────────────┐
+         │  UsersAPI    │                      │  CatalogAPI  │◄──── Redis (cache de /games)
+         │ /User /Auth  │                      │ /games       │
+         └──────┬───────┘                      └──────┬───────┘
+                │                                      │
+        UserCreatedEvent                        OrderPlacedEvent
+                │                                      │
+                ├──────────────┐                       ▼
+                │              │              ┌──────────────────┐
+                ▼              │              │   PaymentsAPI    │ (Worker)
+          ┌──────────┐         │              │ consome          │
+          │ RabbitMQ │         │              │ OrderPlacedEvent │
+          │ (dual-   │         │              └────────┬─────────┘
+          │ publish) │         │                       │
+          └──────────┘         │              PaymentProcessedEvent
+                                │                       │
+                                │         ┌──────────────┴──────────────┐
+                                │         ▼                             ▼
+                                │  RabbitMQ (CatalogAPI consome  RabbitMQ + SQS (dual-publish)
+                                │  e libera o jogo na biblioteca)        │
+                                ▼                                       ▼
+                        SQS "fcg-user-created"          SQS "fcg-payment-processed"
+                                │                                       │
+                                └───────────────┬───────────────────────┘
+                                                 ▼
+                                    ┌─────────────────────────┐
+                                    │   AWS Lambda            │
+                                    │   fcg-notifications-     │
+                                    │   function                │
+                                    │   (fcg-notifications-     │
+                                    │   serverless)              │
+                                    └───────────┬──────────────┘
+                                                │
+                                  ┌─────────────┴─────────────┐
+                                  ▼                           ▼
+                          CloudWatch Logs           DynamoDB "fcg-notification-logs"
+                          [EMAIL SIMULADO]
+
+Observabilidade: UsersAPI e CatalogAPI expõem /metrics (Prometheus) e /health,
+                 scraped por Prometheus, visualizados no Grafana (dashboard "FCG Overview").
 ```
 
 ### Fluxo 1 — Cadastro de Usuário
 
-```text
-Cliente → POST /api/v1/User/register
+```
+Cliente → POST /api/v1/User/register  (via Kong, rota pública)
     └─► UsersAPI cria usuário no banco
-            └─► publica UserCreatedEvent
-                    └─► NotificationsAPI consome
-                            └─► [EMAIL SIMULADO] log de boas-vindas + grava notification_logs
+            ├─► publica UserCreatedEvent no RabbitMQ (histórico/outros consumers futuros)
+            └─► dual-publish: envia o mesmo evento para a fila SQS "fcg-user-created"
+                    └─► aciona a Lambda fcg-notifications-function
+                            └─► [EMAIL SIMULADO] boas-vindas → CloudWatch Logs
+                            └─► grava item em DynamoDB fcg-notification-logs (type: Welcome)
 ```
 
 ### Fluxo 2 — Compra de Jogo
 
-```text
-Cliente → POST /api/v1/games/{id}/acquire  (JWT obrigatório)
+```
+Cliente → POST /api/v1/games/{id}/acquire  (via Kong, JWT obrigatório)
     └─► CatalogAPI publica OrderPlacedEvent (UserId + UserEmail extraídos do JWT) → retorna 202 Accepted
             └─► PaymentsAPI consome OrderPlacedEvent
                     └─► Simula pagamento (90% aprovado / 10% rejeitado)
-                            └─► publica PaymentProcessedEvent
-                                    ├─► CatalogAPI consome (fila catalog-api-payment-processed)
-                                    │       └─► [Approved] adiciona jogo à biblioteca do usuário
-                                    └─► NotificationsAPI consome (fila notifications-worker-payment-processed)
-                                            └─► [Approved] [EMAIL SIMULADO] confirmação de compra + grava notification_logs
+                            └─► publica PaymentProcessedEvent no RabbitMQ
+                            │       └─► CatalogAPI consome (fila catalog-api-payment-processed)
+                            │               └─► [Approved] adiciona jogo à biblioteca do usuário
+                            └─► dual-publish: envia o mesmo evento para SQS "fcg-payment-processed"
+                                    └─► aciona a Lambda fcg-notifications-function
+                                            └─► [EMAIL SIMULADO] confirmação/rejeição → CloudWatch Logs
+                                            └─► grava item em DynamoDB (type: PurchaseConfirmation/PurchaseRejected)
 ```
 
-> **Contratos de evento (`FCG.Events`):** `UserCreatedEvent`, `OrderPlacedEvent` e `PaymentProcessedEvent` existem como cópias locais em cada repositório (sem pacote NuGet compartilhado, para preservar a autonomia de build de cada serviço), mas **todas declaram `namespace FCG.Events;`**. O MassTransit identifica o tipo de uma mensagem no wire pelo namespace + nome do tipo .NET — se um serviço usasse um namespace diferente para sua cópia, publisher e consumer não se reconheceriam como o mesmo evento, e a mensagem seria descartada silenciosamente (sem erro, sem exceção). Pelo mesmo motivo, `PaymentProcessedEvent` é consumido em **filas nomeadas explicitamente** por serviço (`catalog-api-payment-processed`, `notifications-worker-payment-processed`) em vez do nome padrão derivado da classe `PaymentProcessedConsumer` — as duas classes têm o mesmo nome em repositórios diferentes, e sem essa distinção os dois serviços cairiam na mesma fila física, competindo pela mensagem em vez de cada um receber sua cópia.
+> **Contratos de evento (`FCG.Events`):** `UserCreatedEvent`, `OrderPlacedEvent` e `PaymentProcessedEvent` existem como cópias locais em cada repositório (sem pacote NuGet compartilhado, para preservar a autonomia de build de cada serviço), mas **todas declaram `namespace FCG.Events;`**. O MassTransit identifica o tipo de uma mensagem no wire pelo namespace + nome do tipo .NET — se um serviço usasse um namespace diferente para sua cópia, publisher e consumer não se reconheceriam como o mesmo evento, e a mensagem seria descartada silenciosamente (sem erro, sem exceção). Pelo mesmo motivo, `PaymentProcessedEvent` é consumido em fila nomeada explicitamente (`catalog-api-payment-processed`) em vez do nome padrão derivado da classe do consumer.
+>
+> **Por que dual-publish (RabbitMQ + SQS) em vez de substituir a mensageria:** a Lambda roda na AWS real e não tem como consumir RabbitMQ diretamente. Reescrever toda a mensageria para SQS/SNS seria um risco desnecessário — o CatalogAPI continua dependendo do RabbitMQ para `PaymentProcessedEvent`. `UsersAPI` e `PaymentsAPI` publicam a mesma informação duas vezes: uma no RabbitMQ (como sempre) e outra, como DTO plano (sem o envelope do MassTransit), na fila SQS correspondente. Uma falha ao publicar no SQS é *best-effort* — logada, mas não derruba o fluxo principal (usuário/pagamento já processados com sucesso antes desse ponto).
+>
+> **Por que DynamoDB em vez do Postgres original:** a Lambda roda fora do cluster Kubernetes local e não alcança o Postgres do antigo `fcg-notifications-api`. Persistir em DynamoDB resolve essa conectividade e, de quebra, cobre o requisito de NoSQL da Fase 3 usando exatamente o cenário sugerido no enunciado ("logs de eventos").
 
 ---
 
 ## Pré-requisitos
 
 | Ferramenta | Versão mínima | Instalação |
-| :--- | :--- | :--- |
+|---|---|---|
 | Docker Desktop | 4.x | [docker.com](https://www.docker.com/products/docker-desktop/) |
 | Docker Compose | v2 (incluso no Desktop) | — |
 | kubectl | 1.28+ | [kubernetes.io/docs/tasks/tools](https://kubernetes.io/docs/tasks/tools/) |
 | Kubernetes local | qualquer | Docker Desktop K8s, Kind, Minikube ou k3d |
-| .NET SDK | 10.0 | Apenas para build fora do Docker |
+| .NET SDK | 10.0 (e 8.0 só para a Lambda) | Apenas para build fora do Docker |
+| AWS CLI | v2 | [instruções oficiais](https://docs.aws.amazon.com/cli/latest/userguide/getting-started-install.html) |
+| AWS SAM CLI | qualquer recente | [instruções oficiais](https://docs.aws.amazon.com/serverless-application-model/latest/developerguide/install-sam-cli.html) |
 
 ### Estrutura de diretórios esperada
 
 Todos os repositórios devem estar clonados **na mesma pasta raiz**:
 
-```text
-FIAP - MS/              ← pasta raiz
+```
+FIAP - MS/                          ← pasta raiz
 ├── fcg-users-api/
 ├── fcg-catalog-api/
 ├── fcg-payments-api/
-├── fcg-notifications-api/
-└── fcg-infra/          ← este repositório
+├── fcg-notifications-api/          ← histórico (Fase 2); não é mais implantado
+├── fcg-notifications-serverless/   ← Fase 3: função Lambda + IaC (SAM)
+└── fcg-infra/                      ← este repositório
     ├── docker-compose.yml
-    ├── .env.example
+    ├── .env
+    ├── gateway/
+    ├── monitoring/
     └── k8s/
 ```
 
@@ -145,39 +185,37 @@ FIAP - MS/              ← pasta raiz
 
 ## Estrutura do Repositório
 
-```text
-fcg-infra/
-├── docker-compose.yml              # Orquestração local (6 serviços)
-├── .env.example                    # Variáveis de ambiente necessárias
-└── k8s/
-    ├── infra/                      # Infraestrutura compartilhada no cluster
-    │   ├── postgres-deployment.yaml
-    │   ├── postgres-service.yaml
-    │   ├── postgres-secret.yaml
-    │   ├── rabbitmq-deployment.yaml
-    │   ├── rabbitmq-service.yaml
-    │   └── rabbitmq-secret.yaml
-    ├── users-api/                  # Manifests do UsersAPI
-    │   ├── deployment.yaml
-    │   ├── service.yaml            # ClusterIP port 80 → 8080
-    │   ├── configmap.yaml
-    │   └── secret.yaml
-    ├── catalog-api/                # Manifests do CatalogAPI
-    │   ├── deployment.yaml
-    │   ├── service.yaml            # ClusterIP port 80 → 8080
-    │   ├── configmap.yaml
-    │   └── secret.yaml
-    ├── payments-worker/            # Manifests do PaymentsAPI (Worker)
-    │   ├── deployment.yaml
-    │   ├── service.yaml            # Headless (clusterIP: None)
-    │   ├── configmap.yaml
-    │   └── secret.yaml
-    └── notifications-worker/       # Manifests do NotificationsAPI (Worker)
-        ├── deployment.yaml
-        ├── service.yaml            # Headless (clusterIP: None)
-        ├── configmap.yaml
-        └── secret.yaml
 ```
+fcg-infra/
+├── docker-compose.yml              # Orquestração local (9 serviços)
+├── .env                            # Variáveis de ambiente (valores de dev já preenchidos)
+├── scripts/
+│   ├── build-all.sh
+│   └── build-all.ps1
+├── gateway/
+│   └── kong.yml                    # Config declarativo do Kong (usado pelo docker-compose)
+├── monitoring/
+│   ├── prometheus.yml              # Scrape config (usado pelo docker-compose)
+│   └── grafana/
+│       ├── provisioning/           # Datasource + dashboard provider
+│       └── dashboards/
+│           └── fcg-overview.json   # Dashboard: request rate, status code, p95, taxa de erro
+├── aws/
+│   └── fcg-services-policy.json    # IAM policy mínima (sqs:SendMessage) do usuário fcg-services
+└── k8s/
+    ├── 00-namespace.yaml            # Namespace "fcg" (precisa ser aplicado primeiro)
+    ├── infra/                       # PostgreSQL + RabbitMQ
+    ├── shared/                      # Config/segredos comuns: JWT, RabbitMQ, credenciais AWS, URLs das filas SQS
+    ├── redis/                       # Cache distribuído (Fase 3)
+    ├── kong/                        # API Gateway (Fase 3) — mesmo config do gateway/kong.yml, adaptado para o cluster
+    ├── prometheus/                  # Observabilidade Opção A (Fase 3)
+    ├── grafana/                     # Observabilidade Opção A (Fase 3)
+    ├── users-api/
+    ├── catalog-api/                 # Inclui configmap próprio com Redis__ConnectionString
+    └── payments-worker/
+```
+
+> `k8s/notifications-worker/` foi **removido** na Fase 3 — a lógica migrou para a função Lambda em `fcg-notifications-serverless`, mantendo o container antigo rodando derrotaria o propósito da migração.
 
 ---
 
@@ -185,113 +223,103 @@ fcg-infra/
 
 ### Passo 1 — Configure as variáveis de ambiente
 
-Copie o arquivo de exemplo e edite o valor do `JWT_SECRET`:
-
-```bash
-cd fcg-infra
-cp .env.example .env
-```
-
-Conteúdo do `.env`:
+O repositório já inclui um `.env` com valores padrão prontos para desenvolvimento local.
 
 ```env
-# Chave JWT compartilhada entre UsersAPI e CatalogAPI
-# Gere uma nova com: openssl rand -base64 32
+# JWT compartilhada entre UsersAPI e CatalogAPI
 JWT_SECRET=UvPTu5UZIcSe0V1onJSNTWT579OHlmoxXA1flLgKpow=
 
-# Senha do PostgreSQL (usuário: fcg)
+# PostgreSQL / RabbitMQ
 POSTGRES_PASSWORD=fcg_secret
-
-# Senha do RabbitMQ (usuário: guest)
 RABBITMQ_PASSWORD=guest
+
+# Credenciais do IAM user "fcg-services" (dual-publish para a Lambda de notificações)
+AWS_ACCESS_KEY_ID=...
+AWS_SECRET_ACCESS_KEY=...
+AWS_REGION=us-east-1
+
+# URLs reais das filas SQS — saem do "sam deploy" em fcg-notifications-serverless
+AWS_SQS_USER_CREATED_QUEUE_URL=https://sqs.us-east-1.amazonaws.com/<account-id>/fcg-user-created
+AWS_SQS_PAYMENT_PROCESSED_QUEUE_URL=https://sqs.us-east-1.amazonaws.com/<account-id>/fcg-payment-processed
 ```
+
+> ⚠️ Este `.env` fica versionado no repositório com valores reais de desenvolvimento (mesma prática já adotada desde a Fase 2) — servem só para ambiente local, nunca reutilize em produção. Sem as duas últimas variáveis preenchidas, `UsersAPI`/`PaymentsAPI` sobem normalmente — o dual-publish só loga um aviso e segue sem tentar enviar ao SQS.
 
 ### Passo 2 — Suba todos os serviços
 
 ```bash
-# Build + inicialização de todos os containers
 docker compose up -d --build
-
-# Verifique se todos estão Up
 docker compose ps
 ```
 
-Resultado esperado (`docker compose ps`):
+Resultado esperado:
 
-| Container | Status | Ports |
-| :--- | :--- | :--- |
-| `fcg_postgres` | Up (healthy) | `0.0.0.0:5432->5432/tcp` |
-| `fcg_rabbitmq` | Up (healthy) | `0.0.0.0:5672->5672/tcp`, `0.0.0.0:15672->15672/tcp` |
-| `fcg_users_api` | Up | `0.0.0.0:8080->8080/tcp` |
-| `fcg_catalog_api` | Up | `0.0.0.0:8081->8080/tcp` |
-| `fcg_payments_worker` | Up | — |
-| `fcg_notifications_worker` | Up | — |
+| Container | Porta (host) |
+|---|---|
+| `fcg_postgres` | `5432` |
+| `fcg_rabbitmq` | `5672`, `15672` |
+| `fcg_redis` | `6379` |
+| `fcg_kong` | `8000` (proxy), `8001` (admin) |
+| `fcg_prometheus` | `9090` |
+| `fcg_grafana` | `3000` |
+| `fcg_users_api` | `8080` (direto, sem passar pelo Kong) |
+| `fcg_catalog_api` | `8081` (direto, sem passar pelo Kong) |
+| `fcg_payments_worker` | — |
 
-> Os serviços de API aguardam o postgres e rabbitmq passarem no healthcheck antes de iniciar (`depends_on: condition: service_healthy`).
+> Os serviços de API aguardam postgres/rabbitmq/redis ficarem `healthy` antes de iniciar. As portas diretas (`8080`/`8081`) continuam expostas para debug, mas o fluxo real de uso é sempre **via Kong (`8000`)**.
 
 ### Passo 3 — Acesse os serviços
 
 | Interface | URL | Credenciais |
-| :--- | :--- | :--- |
-| UsersAPI Swagger | `http://localhost:8080/swagger` | — |
-| CatalogAPI Swagger | `http://localhost:8081/swagger` | JWT necessário |
-| RabbitMQ Management | `http://localhost:15672` | `guest` / `guest` |
+|---|---|---|
+| Kong (proxy — ponto de entrada real) | http://localhost:8000 | JWT nas rotas protegidas |
+| UsersAPI Swagger | http://localhost:8080/swagger | — |
+| CatalogAPI Swagger | http://localhost:8081/swagger | JWT necessário |
+| RabbitMQ Management | http://localhost:15672 | `guest` / `guest` |
+| Prometheus | http://localhost:9090 | — |
+| Grafana | http://localhost:3000 | `admin` / `admin` |
 
-### Passo 4 — Teste os fluxos
+### Passo 4 — Teste os fluxos (via Kong)
 
-**Fluxo de cadastro:**
+**Cadastro:**
 ```bash
-# 1. Registrar usuário (deve disparar e-mail de boas-vindas no log do notifications-worker)
 # Email e Password são Value Objects — o JSON precisa envolver o valor em { "value": "..." }
-curl -X POST http://localhost:8080/api/v1/User/register \
+curl -X POST http://localhost:8000/api/v1/User/register \
   -H "Content-Type: application/json" \
   -d '{"name":"João Silva","email":{"value":"joao@example.com"},"password":{"value":"Senha@123"}}'
 
-# 2. Verificar log do notifications-worker
-docker compose logs notifications-worker | grep "EMAIL SIMULADO"
-
-# 3. Conferir o registro persistido em notification_logs
-docker exec -it fcg_postgres psql -U fcg -d fcg_notifications_db \
-  -c "SELECT type, recipient, message FROM notification_logs ORDER BY sent_at DESC LIMIT 5;"
+# Confirmar: CloudWatch Logs (grupo /aws/lambda/fcg-notifications-function) com "[EMAIL SIMULADO]"
+# Confirmar: item novo na tabela DynamoDB fcg-notification-logs (type: Welcome)
 ```
 
-**Fluxo de compra:**
+**Compra de jogo:**
 ```bash
-# 1. Fazer login e obter JWT
-TOKEN=$(curl -s -X POST http://localhost:8080/api/v1/Auth/login \
+TOKEN=$(curl -s -X POST http://localhost:8000/api/v1/Auth/login \
   -H "Content-Type: application/json" \
   -d '{"email":{"value":"joao@example.com"},"password":{"value":"Senha@123"}}' | jq -r '.data.token')
 
-# 2. Iniciar compra de jogo (retorna 202 Accepted)
-curl -X POST http://localhost:8081/api/v1/games/{id}/acquire \
-  -H "Authorization: Bearer $TOKEN"
+# Sem token: 401 do próprio Kong (não chega a bater no serviço)
+curl -i http://localhost:8000/api/v1/games
 
-# 3. Verificar logs do pagamento e notificação
-docker compose logs payments-worker
-docker compose logs notifications-worker
+# Com token válido: 200, resposta real do CatalogAPI
+curl http://localhost:8000/api/v1/games -H "Authorization: Bearer $TOKEN"
+
+# Comprar (retorna 202 Accepted)
+curl -X POST http://localhost:8000/api/v1/games/{id}/acquire -H "Authorization: Bearer $TOKEN"
 ```
 
 ### Passo 5 — Monitorar logs
 
 ```bash
-# Todos os serviços simultaneamente
 docker compose logs -f
-
-# Serviço específico
-docker compose logs -f users-api
-docker compose logs -f catalog-api
-docker compose logs -f payments-worker
-docker compose logs -f notifications-worker
+docker compose logs -f users-api catalog-api payments-worker kong
 ```
 
 ### Passo 6 — Encerrar
 
 ```bash
-# Apenas parar os containers
-docker compose down
-
-# Parar e remover volumes (apaga os bancos de dados)
-docker compose down -v
+docker compose down        # apenas parar
+docker compose down -v     # parar e remover volumes (apaga os bancos)
 ```
 
 ---
@@ -300,11 +328,8 @@ docker compose down -v
 
 ### Passo 1 — Habilite o Kubernetes local
 
-No **Docker Desktop**: Settings → Kubernetes → Enable Kubernetes → Apply & Restart.
+Docker Desktop: Settings → Kubernetes → Enable Kubernetes → Apply & Restart. Para Kind/Minikube, consulte a documentação oficial.
 
-Para **Kind** ou **Minikube**, consulte a documentação oficial de cada ferramenta.
-
-Verifique que o cluster está ativo:
 ```bash
 kubectl cluster-info
 kubectl get nodes
@@ -312,11 +337,9 @@ kubectl get nodes
 
 ### Passo 2 — Build das imagens Docker locais
 
-Execute a partir da **pasta raiz** (onde estão todos os repositórios):
-
 ```bash
 cd "FIAP - MS"
-./fcg-infra/scripts/build-all.sh
+./fcg-infra/scripts/build-all.sh      # ou build-all.ps1 no Windows
 ```
 
 Ou individualmente:
@@ -324,104 +347,105 @@ Ou individualmente:
 docker build -t fcg-users-api:latest ./fcg-users-api
 docker build -t fcg-catalog-api:latest ./fcg-catalog-api
 docker build -t fcg-payments-api:latest ./fcg-payments-api
-docker build -t fcg-notifications-api:latest ./fcg-notifications-api
 ```
 
-Confirme que as imagens foram criadas:
-```bash
-docker images | grep fcg
-```
+> A `fcg-notifications-serverless` **não** entra nesse build — ela não roda em container, é implantada via `sam deploy` (ver seção [Persistência Poliglota](#persistência-poliglota) e o README do próprio repositório).
 
-> Os manifests usam `imagePullPolicy: Never` para usar as imagens locais sem precisar de um registry remoto.
+### Passo 3 — Personalize os Secrets (opcional)
 
-### Passo 3 — Ordem de Aplicação (Crítico)
+Config/segredos comuns a mais de um serviço ficam centralizados em `k8s/shared/` — veja a seção [Hierarquia de Configuração e Secrets](#hierarquia-de-configuração-e-secrets) para os detalhes de por que essa separação existe.
 
-Para garantir que a infraestrutura e os segredos estejam prontos antes das aplicações, aplique os manifests **exatamente** nesta ordem (todos criados no namespace `fcg`):
+- `k8s/shared/configmap.yaml` — Jwt Issuer/Audience/ExpirationMinutes, RabbitMq Host/Username, **URLs das filas SQS**.
+- `k8s/shared/secret.yaml` — Jwt SecretKey, RabbitMq Password, **credenciais do IAM user `fcg-services`** (`AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY`/`AWS_REGION` — nomes exigidos pela cadeia de resolução de credenciais do AWS SDK, não pelo padrão `Config__Nested` usado no resto do arquivo).
+
+O que resta em cada pasta por serviço é só o que é exclusivo dele (connection string do Postgres, e no caso do CatalogAPI, também `Redis__ConnectionString`).
+
+> Se trocar `Jwt__SecretKey`, também precisa atualizar a credencial JWT do Kong em `k8s/kong/configmap.yaml` (campo `secret`) — veja a nota de JWT na seção de Troubleshooting.
+
+### Passo 4 — Aplique os manifests
+
+Todos os recursos são criados no namespace dedicado `fcg`. Aplique **exatamente** nesta ordem:
 
 ```bash
 cd fcg-infra
 
-# 0. Namespace (precisa existir antes dos demais recursos)
 kubectl apply -f k8s/00-namespace.yaml
+kubectl apply -f k8s/infra/                # PostgreSQL + RabbitMQ
+kubectl apply -f k8s/shared/                # Config/segredos compartilhados
+kubectl apply -f k8s/redis/                 # Cache do CatalogAPI
 
-# 1. Infraestrutura (PostgreSQL + RabbitMQ)
-kubectl apply -f k8s/infra/
-
-# 2. Configuração/segredos compartilhados
-kubectl apply -f k8s/shared/
-
-# 3. Microsserviços
 kubectl apply -f k8s/users-api/
 kubectl apply -f k8s/catalog-api/
 kubectl apply -f k8s/payments-worker/
-kubectl apply -f k8s/notifications-worker/
+
+kubectl apply -f k8s/kong/                  # API Gateway
+kubectl apply -f k8s/prometheus/            # Observabilidade
+kubectl apply -f k8s/grafana/
 ```
 
-### Passo 4 — Verifique o status dos pods
+### Passo 5 — Verifique o status
 
 ```bash
-# Listar todos os pods do namespace fcg
 kubectl get pods -n fcg
-
-# Listar todos os services do namespace fcg
 kubectl get services -n fcg
-
-# Aguardar todos os pods ficarem Ready
 kubectl wait --for=condition=ready pod --all -n fcg --timeout=120s
 ```
 
-Resultado esperado (`kubectl get pods`):
-
-```text
-NAME                                    READY   STATUS    RESTARTS   AGE
-postgres-<hash>                         1/1     Running   0          2m
-rabbitmq-<hash>                         1/1     Running   0          2m
-users-api-<hash>                        1/1     Running   0          1m
-catalog-api-<hash>                      1/1     Running   0          1m
-payments-worker-<hash>                  1/1     Running   0          1m
-notifications-worker-<hash>             1/1     Running   0          1m
-```
-
-### Passo 5 — Acesse as APIs via port-forward
+### Passo 6 — Acesse via port-forward
 
 ```bash
-# Terminal 1 — UsersAPI
-kubectl port-forward service/users-api 8080:80
-
-# Terminal 2 — CatalogAPI
-kubectl port-forward service/catalog-api 8081:80
-
-# Terminal 3 — RabbitMQ Management (opcional)
-kubectl port-forward service/rabbitmq 15672:15672
+kubectl port-forward service/kong 8000:8000 -n fcg          # ponto de entrada real
+kubectl port-forward service/grafana 3000:3000 -n fcg
+kubectl port-forward service/prometheus 9090:9090 -n fcg
+kubectl port-forward service/rabbitmq 15672:15672 -n fcg
 ```
 
-Acesse:
-- UsersAPI Swagger: `http://localhost:8080/swagger`
-- CatalogAPI Swagger: `http://localhost:8081/swagger`
-- RabbitMQ Management: `http://localhost:15672`
-
-### Passo 6 — Monitore os logs no cluster
+### Passo 7 — Monitore os logs
 
 ```bash
-# Logs de um deployment
-kubectl logs -f deployment/users-api
-kubectl logs -f deployment/payments-worker
-kubectl logs -f deployment/notifications-worker
-
-# Descrever um pod (útil para debugar falhas de startup)
-kubectl describe pod <nome-do-pod>
+kubectl logs -f deployment/users-api -n fcg
+kubectl logs -f deployment/payments-worker -n fcg
+kubectl logs -f deployment/kong -n fcg
+# Logs da Lambda: CloudWatch Logs, grupo /aws/lambda/fcg-notifications-function
 ```
 
-### Passo 7 — Remover tudo do cluster
+### Passo 8 — Remover tudo do cluster
 
 ```bash
-kubectl delete -f k8s/notifications-worker/
+kubectl delete -f k8s/grafana/
+kubectl delete -f k8s/prometheus/
+kubectl delete -f k8s/kong/
 kubectl delete -f k8s/payments-worker/
 kubectl delete -f k8s/catalog-api/
 kubectl delete -f k8s/users-api/
-kubectl delete -f k8s/shared/
+kubectl delete -f k8s/redis/
 kubectl delete -f k8s/infra/
 ```
+
+Para remover os recursos da AWS: `sam delete --profile fcg-deploy` no repositório `fcg-notifications-serverless`.
+
+---
+
+## Observabilidade
+
+**Stack escolhida: Opção A — Prometheus + Grafana** (código aberto, self-hosted no cluster).
+
+- `UsersAPI` e `CatalogAPI` expõem `/metrics` (formato Prometheus, via `prometheus-net.AspNetCore`) e `/health` — ambas as rotas ficam fora da validação JWT do Kong, já que o Prometheus fala direto com o Service do Kubernetes.
+- `k8s/prometheus/` faz scrape estático dos dois serviços a cada 15s.
+- `k8s/grafana/` provisiona automaticamente o datasource (`http://prometheus:9090`) e o dashboard **"FCG Overview"**, com 4 painéis:
+  - Request rate (req/s) por serviço
+  - Requisições por status code
+  - Latência p95
+  - Taxa de erro (5xx / total)
+
+Métricas usadas nas queries: `http_request_duration_seconds` (histograma; `_count` dá o total de requisições, `_bucket` alimenta o `histogram_quantile` da latência) e o label `code` para quebrar por status HTTP.
+
+---
+
+## Persistência Poliglota
+
+- **Cache distribuído (Redis):** `CatalogAPI` cacheia a listagem de jogos (`games:all`, TTL de 60s) via `IDistributedCache`/`StackExchange.Redis`, com invalidação explícita em criar/atualizar/remover jogo.
+- **NoSQL (DynamoDB):** a função Lambda em `fcg-notifications-serverless` grava cada notificação simulada (boas-vindas, confirmação/rejeição de compra) na tabela `fcg-notification-logs`. Ver o README daquele repositório para o schema e como fazer o deploy (`sam build && sam deploy --guided`).
 
 ---
 
@@ -429,10 +453,10 @@ kubectl delete -f k8s/infra/
 
 Para evitar divergências, os arquivos `secret.yaml` e `configmap.yaml` adotam uma estrutura hierárquica:
 
-*   **Shared (`k8s/shared/`):** Contém configurações e segredos comuns a mais de um serviço (RabbitMQ host/usuário, JWT Issuer/Audience/SecretKey). O que estiver aqui **deve ser idêntico** entre os serviços (ex: se trocar o `Jwt__SecretKey` aqui, o token emitido pelo UsersAPI e validado pelo CatalogAPI continuarão funcionando, pois ambos leem do mesmo lugar).
-*   **Service Specific (`k8s/<servico>/`):** O que resta em cada pasta por serviço é só o que é exclusivo dele (normalmente a connection string do Postgres).
+- **Shared (`k8s/shared/`):** configurações e segredos comuns a mais de um serviço — JWT (Issuer/Audience/SecretKey), RabbitMQ (Host/Username/Password), credenciais AWS e URLs das filas SQS. O que estiver aqui **deve ser idêntico** entre os serviços: se trocar o `Jwt__SecretKey`, o token emitido pelo UsersAPI continua sendo aceito pelo CatalogAPI porque os dois leem do mesmo lugar via `envFrom`.
+- **Service Specific (`k8s/<servico>/`):** o que resta em cada pasta por serviço é só o que é exclusivo dele — normalmente a connection string do Postgres, e no caso do CatalogAPI, também o `Redis__ConnectionString`.
 
-> **Segurança:** Nunca comite arquivos com valores reais em `k8s/secret.yaml` ou `.env`. Use os templates fornecidos e substitua localmente (ex: gere um novo JWT com `openssl rand -base64 32`).
+> **Segurança:** os valores atuais em `k8s/*/secret.yaml` e `.env` são de desenvolvimento (a mesma prática desde a Fase 2 — dev secrets versionados para facilitar a correção/avaliação). Em qualquer ambiente real, gere valores próprios (`openssl rand -base64 32` para o JWT) e nunca reutilize os deste repositório.
 
 ---
 
@@ -441,96 +465,79 @@ Para evitar divergências, os arquivos `secret.yaml` e `configmap.yaml` adotam u
 ### UsersAPI
 
 | Variável | Exemplo | Origem |
-| :--- | :--- | :--- |
-| `ConnectionStrings__Postgres` | `Host=postgres;Port=5432;Database=fcg_users_db;Username=fcg;Password=fcg_secret` | Secret |
-| `Jwt__SecretKey` | `UvPTu5UZ...` | Secret (Shared) |
-| `Jwt__Issuer` | `FCG.Api` | ConfigMap (Shared) |
-| `Jwt__Audience` | `FCG.Client` | ConfigMap (Shared) |
-| `Jwt__ExpirationMinutes` | `60` | ConfigMap (Shared) |
-| `RabbitMq__Host` | `rabbitmq` | ConfigMap (Shared) |
-| `RabbitMq__Username` | `guest` | ConfigMap (Shared) |
-| `RabbitMq__Password` | `guest` | Secret (Shared) |
+|---|---|---|
+| `ConnectionStrings__Postgres` | `Host=postgres;...` | Secret próprio |
+| `Jwt__SecretKey` | `UvPTu5UZ...` | `fcg-shared-secret` |
+| `Jwt__Issuer` / `Jwt__Audience` / `Jwt__ExpirationMinutes` | `FCG.Api` / `FCG.Client` / `60` | `fcg-shared-config` |
+| `RabbitMq__Host` / `Username` / `Password` | `rabbitmq` / `guest` / `guest` | `fcg-shared-config` / `fcg-shared-secret` |
+| `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` / `AWS_REGION` | — | `fcg-shared-secret` |
+| `Aws__Sqs__UserCreatedQueueUrl` | `https://sqs.us-east-1.amazonaws.com/.../fcg-user-created` | `fcg-shared-config` |
 
 ### CatalogAPI
 
+Mesmas variáveis de JWT/RabbitMQ do UsersAPI (com `Jwt__Issuer` = `FCG.UsersAPI`), mais:
+
 | Variável | Exemplo | Origem |
-| :--- | :--- | :--- |
-| `ConnectionStrings__Postgres` | `Host=postgres;Port=5432;Database=fcg_catalog_db;Username=fcg;Password=fcg_secret` | Secret |
-| `Jwt__SecretKey` | `UvPTu5UZ...` | Secret (Shared) |
-| `Jwt__Issuer` | `FCG.UsersAPI` | ConfigMap (Shared) |
-| `Jwt__Audience` | `FCG.Client` | ConfigMap (Shared) |
-| `RabbitMq__Host` | `rabbitmq` | ConfigMap (Shared) |
-| `RabbitMq__Username` | `guest` | ConfigMap (Shared) |
-| `RabbitMq__Password` | `guest` | Secret (Shared) |
+|---|---|---|
+| `Redis__ConnectionString` | `redis:6379` | `catalog-api-config` (próprio do serviço, não é `shared` porque só o CatalogAPI usa Redis hoje) |
 
 ### PaymentsAPI (Worker)
 
-| Variável | Exemplo | Origem |
-| :--- | :--- | :--- |
-| `ConnectionStrings__Postgres` | `Host=postgres;Port=5432;Database=fcg_payments_db;Username=fcg;Password=fcg_secret` | Secret |
-| `RabbitMq__Host` | `rabbitmq` | ConfigMap (Shared) |
-| `RabbitMq__Username` | `guest` | ConfigMap (Shared) |
-| `RabbitMq__Password` | `guest` | Secret (Shared) |
-
-### NotificationsAPI (Worker)
+Mesmas variáveis de RabbitMQ, mais:
 
 | Variável | Exemplo | Origem |
-| :--- | :--- | :--- |
-| `ConnectionStrings__Postgres` | `Host=postgres;Port=5432;Database=fcg_notifications_db;Username=fcg;Password=fcg_secret` | Secret |
-| `RabbitMq__Host` | `rabbitmq` | ConfigMap (Shared) |
-| `RabbitMq__Username` | `guest` | ConfigMap (Shared) |
-| `RabbitMq__Password` | `guest` | Secret (Shared) |
+|---|---|---|
+| `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` / `AWS_REGION` | — | `fcg-shared-secret` |
+| `Aws__Sqs__PaymentProcessedQueueUrl` | `https://sqs.us-east-1.amazonaws.com/.../fcg-payment-processed` | `fcg-shared-config` |
 
-> Cada notificação simulada (boas-vindas, confirmação/rejeição de compra) é registrada na tabela `notification_logs` do banco `fcg_notifications_db`, além do log em console — útil para demonstrar o fluxo sem depender de captura de tela do terminal no timing certo.
+> **Nota sobre JWT:** `Jwt__SecretKey` deve ser **idêntico** em `UsersAPI`, `CatalogAPI` e na credencial JWT configurada no Kong (`k8s/kong/configmap.yaml`) — os três validam/assinam tokens com a mesma chave.
+>
+> Cada notificação simulada (boas-vindas, confirmação/rejeição de compra) é registrada na tabela DynamoDB `fcg-notification-logs`, além do log `[EMAIL SIMULADO]` no CloudWatch — útil para demonstrar o fluxo sem depender de captura de tela do terminal no timing certo.
 
 ---
 
-## Endpoints das APIs
+## Endpoints (via Kong)
 
-### UsersAPI — `http://localhost:8080`
+Ponto de entrada único: **`http://localhost:8000`** (local) ou o endereço do Service `kong` no cluster.
 
-| Método | Rota | Auth | Descrição |
-| :--- | :--- | :--- | :--- |
-| `POST` | `/api/v1/User/register` | Anônimo | Cadastra usuário + dispara e-mail de boas-vindas |
-| `POST` | `/api/v1/Auth/login` | Anônimo | Autentica e retorna JWT |
-| `GET` | `/api/v1/User/get-all` | Admin | Lista todos os usuários |
-| `GET` | `/api/v1/User/get-by-id` | Admin | Busca usuário por ID |
-| `PATCH` | `/api/v1/User/update-by-id` | User/Admin | Atualiza dados do perfil |
+| Método | Rota | Auth | Serviço |
+|---|---|---|---|
+| `POST` | `/api/v1/User/register` | Pública | UsersAPI |
+| `POST` | `/api/v1/Auth/login` | Pública | UsersAPI |
+| `GET` | `/api/v1/User/get-all` | JWT (Admin) | UsersAPI |
+| `GET` | `/api/v1/User/get-by-id` | JWT (Admin) | UsersAPI |
+| `PATCH` | `/api/v1/User/update-by-id` | JWT (User/Admin) | UsersAPI |
+| `GET` | `/api/v1/games` | JWT | CatalogAPI |
+| `GET` | `/api/v1/games/search` | JWT | CatalogAPI |
+| `POST` | `/api/v1/games` | JWT (Admin) | CatalogAPI |
+| `PATCH` \| `DELETE` | `/api/v1/games/{id}` | JWT (Admin) | CatalogAPI |
+| `POST` | `/api/v1/games/{id}/acquire` | JWT | CatalogAPI → retorna 202 |
 
 > `Email` e `Password` são Value Objects — o corpo de `register`/`login` precisa envolver o valor: `{ "email": { "value": "..." }, "password": { "value": "..." } }`.
-
-### CatalogAPI — `http://localhost:8081`
-
-| Método | Rota | Auth | Descrição |
-| :--- | :--- | :--- | :--- |
-| `GET` | `/api/v1/games` | User/Admin | Lista jogos do catálogo |
-| `GET` | `/api/v1/games/search` | User/Admin | Busca jogos com paginação |
-| `POST` | `/api/v1/games` | Admin | Cria novo jogo |
-| `PATCH` | `/api/v1/games/{id}` | Admin | Atualiza jogo |
-| `DELETE` | `/api/v1/games/{id}` | Admin | Remove jogo |
-| `POST` | `/api/v1/games/{id}/acquire` | User/Admin | Inicia fluxo de compra → retorna 202 |
+>
+> `/metrics` e `/health` de cada serviço não passam pelo Kong — são acessados direto pelo Prometheus via Service do Kubernetes.
 
 ---
 
 ## Troubleshooting
 
 ### Container da API não sobe (exit code 1)
-O serviço aguarda postgres e rabbitmq ficarem `healthy`. Se demorar, verifique:
+O serviço aguarda postgres/rabbitmq/redis ficarem `healthy`:
 ```bash
 docker compose logs postgres
 docker compose logs rabbitmq
 ```
 
-### A regra de ouro das dependências (K8s)
-Se os pods de API ficarem em `CrashLoopBackOff` na inicialização, não se preocupe: eles possuem `restartPolicy: Always` e aguardam a infraestrutura. Se o problema persistir:
+### Pod com status `CrashLoopBackOff`
+Os pods de API têm `restartPolicy: Always` e reiniciam sozinhos aguardando a infraestrutura. Se persistir:
 ```bash
-kubectl describe pod <nome-do-pod>
-kubectl logs <nome-do-pod> --previous
+kubectl describe pod <nome-do-pod> -n fcg
+kubectl logs <nome-do-pod> -n fcg --previous
 ```
-*Causas comuns: Secret com valor errado, imagem Docker não encontrada (`imagePullPolicy: Never` requer build local).*
+Causas comuns: Secret com valor errado, imagem Docker não encontrada (`imagePullPolicy: Never` requer build local).
 
 ### Pod com status `ErrImageNeverPull` mesmo após `docker build`
-Em versões recentes do Docker Desktop, o Kubernetes roda em **modo `kind`** (confirme com `docker desktop kubernetes status`) — o node do cluster usa um `containerd` próprio, separado do namespace de imagens (`moby`) usado pelo `docker build`/`docker images`. Ou seja, a imagem existe no seu Docker Engine, mas o `kubelet` não a enxerga.
+Em versões recentes do Docker Desktop, o Kubernetes roda em modo `kind` (confirme com `docker desktop kubernetes status`) — o node do cluster usa um `containerd` próprio, separado do namespace de imagens (`moby`) usado pelo `docker build`. A imagem existe no seu Docker Engine, mas o `kubelet` não a enxerga.
 
 Sintoma: `kubectl describe pod <nome>` mostra `Container image "fcg-xxx-api:latest" is not present with pull policy of Never`.
 
@@ -543,28 +550,32 @@ docker desktop kubernetes reset-cluster
 ./fcg-infra/scripts/build-all.sh
 kubectl apply -f k8s/00-namespace.yaml
 kubectl apply -f k8s/infra/ && kubectl apply -f k8s/shared/
-kubectl apply -f k8s/users-api/ && kubectl apply -f k8s/catalog-api/ \
-  && kubectl apply -f k8s/payments-worker/ && kubectl apply -f k8s/notifications-worker/
+kubectl apply -f k8s/users-api/ && kubectl apply -f k8s/catalog-api/ && kubectl apply -f k8s/payments-worker/
 ```
 
 Se persistir, importe a imagem manualmente para o namespace `k8s.io` do containerd do node:
 ```bash
 kubectl debug node/<nome-do-node> --image=alpine:latest -it=false -- sleep 3600
-# pegue o nome do pod criado (node-debugger-...) e rode, para cada imagem:
 docker save fcg-users-api:latest | kubectl exec -i <pod-debug> -- chroot /host ctr -n k8s.io images import -
 ```
 
-### Migrations não executam no K8s
-Os serviços executam `MigrateAsync()` no startup. Se o postgres ainda não estiver pronto, o pod vai reiniciar. O `restartPolicy: Always` garante que ele tente novamente. Aguarde o pod estabilizar.
+### 401 em tudo, mesmo com token válido, ao passar pelo Kong
+O `key` da credencial JWT do Kong (`k8s/kong/configmap.yaml`) precisa ser **exatamente igual** ao claim `iss` do token (hoje `FCG.Api`, o `Jwt:Issuer` do UsersAPI), e o `secret` precisa ser idêntico ao `Jwt__SecretKey`. O Kong usa a string literalmente como bytes UTF-8 (sem decodificar base64) — mesmo comportamento do `SymmetricSecurityKey` do .NET, então basta colar o mesmo valor.
 
-### JWT inválido no CatalogAPI (`401 Unauthorized`)
-O `Jwt__SecretKey` nos secrets de `users-api` e `catalog-api` deve ser idêntico. Verifique:
+### JWT inválido diretamente no CatalogAPI (`401`, sem passar pelo Kong)
 ```bash
+kubectl get secret catalog-api-secret -n fcg -o jsonpath='{.data.Jwt__SecretKey}' | base64 -d
 kubectl get secret fcg-shared-secret -n fcg -o jsonpath='{.data.Jwt__SecretKey}' | base64 -d
 ```
+Precisam ser idênticos.
 
-### RabbitMQ não recebe mensagens
-Acesse o Management UI (`http://localhost:15672` ou via port-forward) e verifique se as filas `UserCreated`, `OrderPlaced` e `PaymentProcessed` estão criadas, com pelo menos 1 consumer cada (`PaymentProcessed` deve ter 2: CatalogAPI e NotificationsAPI). As filas são criadas automaticamente pelo MassTransit na primeira conexão dos consumers.
+### Lambda não é acionada / nada aparece no CloudWatch Logs
+1. Confirme que `Aws__Sqs__UserCreatedQueueUrl`/`Aws__Sqs__PaymentProcessedQueueUrl` estão preenchidos em `k8s/shared/configmap.yaml` (ou no `.env`, no caso do compose) com as URLs reais do `sam deploy`.
+2. Confirme que `AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY` em `fcg-shared-secret` pertencem a um IAM user com permissão `sqs:SendMessage` nessas duas filas (`fcg-infra/aws/fcg-services-policy.json`).
+3. Sem essas variáveis, o dual-publish só loga um aviso (`"... não configurado — pulando dual-publish"`) e segue — não é um erro que trava o fluxo principal, mas explica por que a Lambda não dispara.
+
+### RabbitMQ não recebe mensagens / filas acumulando sem consumer
+Acesse o Management UI (`http://localhost:15672` ou via port-forward) e confirme os consumers de cada fila (`OrderPlaced` e `catalog-api-payment-processed` devem ter pelo menos 1 cada). Desde a Fase 3, as filas `UserCreated` e a antiga `notifications-worker-payment-processed` não têm mais consumer (o `notifications-worker` que as lia foi descomissionado) — isso é esperado e inofensivo (RabbitMQ só acumula as mensagens), mas se quiser eliminar o acúmulo, considere remover essas filas/bindings do lado do publisher. As filas são criadas automaticamente pelo MassTransit na primeira conexão dos consumers.
 
 ---
 
@@ -575,12 +586,13 @@ Para detalhes específicos sobre a lógica de domínio, padrões arquiteturais e
 - [Users API](https://github.com/filipifirmino/fcg-users-api)
 - [Catalog API](https://github.com/filipifirmino/fcg-catalog-api)
 - [Payments Worker](https://github.com/filipifirmino/fcg-payments-api)
-- [Notifications Worker](https://github.com/filipifirmino/fcg-notifications-api)
+- [Notifications Worker (Fase 2, histórico)](https://github.com/filipifirmino/fcg-notifications-api)
+- [Notifications Serverless (Fase 3, atual)](https://github.com/filipifirmino/fcg-notifications-serverless)
 
 ---
 
 ## Grupo 14
 
-Projeto desenvolvido para o **Tech Challenge — Fase 2** da pós-graduação em **Full Stack Developer** — FIAP.
+Projeto desenvolvido para o **Tech Challenge — Fase 3** da pós-graduação em **Full Stack Developer** — FIAP.
 
-**Tecnologias:** .NET 10 · ASP.NET Core · Entity Framework Core · PostgreSQL · RabbitMQ · MassTransit · Docker · Kubernetes
+**Tecnologias:** .NET 10 (.NET 8 na Lambda) · ASP.NET Core · Entity Framework Core · PostgreSQL · RabbitMQ · MassTransit · Redis · Kong · Prometheus · Grafana · AWS Lambda · Amazon SQS · Amazon DynamoDB · Docker · Kubernetes

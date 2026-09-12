@@ -9,5 +9,7 @@ data:
   Jwt__ExpirationMinutes: "60"
   RabbitMq__Host: "rabbitmq"
   RabbitMq__Username: "guest"
+  Aws__Sqs__UserCreatedQueueUrl: "https://sqs.us-east-1.amazonaws.com/122102659912/fcg-user-created"
+  Aws__Sqs__PaymentProcessedQueueUrl: "https://sqs.us-east-1.amazonaws.com/122102659912/fcg-payment-processed"
   ASPNETCORE_ENVIRONMENT: "Production"
   DOTNET_ENVIRONMENT: "Production"

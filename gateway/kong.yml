@@ -1,0 +1,39 @@
+_format_version: "3.0"
+_transform: true
+
+services:
+  - name: users-api
+    url: http://users-api:8080
+    routes:
+      # Sem plugin jwt. Mais específicas que "users-protected" abaixo, então o
+      # router do Kong as prioriza (o path mais específico sempre vence).
+      - name: auth-login
+        paths: ["/api/v1/Auth/login"]
+        strip_path: false
+      - name: users-register
+        paths: ["/api/v1/User/register"]
+        strip_path: false
+      - name: users-protected
+        paths: ["/api/v1/User"]
+        strip_path: false
+        plugins:
+          - name: jwt
+
+  - name: catalog-api
+    url: http://catalog-api:8080
+    routes:
+      - name: catalog-protected
+        paths: ["/api/v1/games"]
+        strip_path: false
+        plugins:
+          - name: jwt
+
+consumers:
+  - username: fcg-client
+    jwt_secrets:
+      # "key" precisa bater com o claim "iss" emitido pelo UsersAPI (Jwt:Issuer).
+      # "secret" é colado literalmente (sem base64-decode) — mesmo comportamento
+      # do SymmetricSecurityKey do .NET, que usa a string como bytes UTF-8 crus.
+      - key: FCG.Api
+        algorithm: HS256
+        secret: UvPTu5UZIcSe0V1onJSNTWT579OHlmoxXA1flLgKpow=

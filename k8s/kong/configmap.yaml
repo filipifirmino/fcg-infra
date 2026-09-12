@@ -1,0 +1,43 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: kong-config
+  namespace: fcg
+data:
+  kong.yml: |
+    _format_version: "3.0"
+    _transform: true
+
+    services:
+      - name: users-api
+        url: http://users-api.fcg.svc.cluster.local
+        routes:
+          - name: auth-login
+            paths: ["/api/v1/Auth/login"]
+            strip_path: false
+          - name: users-register
+            paths: ["/api/v1/User/register"]
+            strip_path: false
+          - name: users-protected
+            paths: ["/api/v1/User"]
+            strip_path: false
+            plugins:
+              - name: jwt
+
+      - name: catalog-api
+        url: http://catalog-api.fcg.svc.cluster.local
+        routes:
+          - name: catalog-protected
+            paths: ["/api/v1/games"]
+            strip_path: false
+            plugins:
+              - name: jwt
+
+    consumers:
+      - username: fcg-client
+        jwt_secrets:
+          # "key" precisa bater com o claim "iss" emitido pelo UsersAPI (Jwt:Issuer).
+          # "secret" precisa ser IDÊNTICO ao Jwt__SecretKey (fcg-shared-secret).
+          - key: FCG.Api
+            algorithm: HS256
+            secret: UvPTu5UZIcSe0V1onJSNTWT579OHlmoxXA1flLgKpow=

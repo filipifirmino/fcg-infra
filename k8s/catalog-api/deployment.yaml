@@ -22,6 +22,8 @@ spec:
           envFrom:
             - configMapRef:
                 name: fcg-shared-config
+            - configMapRef:
+                name: catalog-api-config
             - secretRef:
                 name: fcg-shared-secret
             - secretRef:

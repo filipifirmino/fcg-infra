@@ -32,6 +32,65 @@ services:
       retries: 5
     restart: unless-stopped
 
+  redis:
+    image: redis:7-alpine
+    container_name: fcg_redis
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  kong:
+    image: kong:latest
+    container_name: fcg_kong
+    environment:
+      KONG_DATABASE: "off"
+      KONG_DECLARATIVE_CONFIG: /kong/declarative/kong.yml
+      KONG_PROXY_ACCESS_LOG: /dev/stdout
+      KONG_ADMIN_ACCESS_LOG: /dev/stdout
+      KONG_PROXY_ERROR_LOG: /dev/stderr
+      KONG_ADMIN_ERROR_LOG: /dev/stderr
+      KONG_ADMIN_LISTEN: 0.0.0.0:8001
+    volumes:
+      - ./gateway/kong.yml:/kong/declarative/kong.yml:ro
+    ports:
+      - "8000:8000"
+      - "8001:8001"
+    depends_on:
+      - users-api
+      - catalog-api
+    restart: unless-stopped
+
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: fcg_prometheus
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    restart: unless-stopped
+
+  grafana:
+    image: grafana/grafana:latest
+    container_name: fcg_grafana
+    ports:
+      - "3000:3000"
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: admin
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Viewer
+    volumes:
+      - ./monitoring/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./monitoring/grafana/dashboards:/var/lib/grafana/dashboards:ro
+    depends_on:
+      - prometheus
+    restart: unless-stopped
+
   users-api:
     build:
       context: ../fcg-users-api
@@ -48,6 +107,10 @@ services:
       RabbitMq__Host: "rabbitmq"
       RabbitMq__Username: "guest"
       RabbitMq__Password: ${RABBITMQ_PASSWORD:-guest}
+      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID:-}
+      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY:-}
+      AWS_REGION: ${AWS_REGION:-us-east-1}
+      Aws__Sqs__UserCreatedQueueUrl: ${AWS_SQS_USER_CREATED_QUEUE_URL:-}
       ASPNETCORE_ENVIRONMENT: "Production"
     depends_on:
       postgres:
@@ -71,11 +134,14 @@ services:
       RabbitMq__Host: "rabbitmq"
       RabbitMq__Username: "guest"
       RabbitMq__Password: ${RABBITMQ_PASSWORD:-guest}
+      Redis__ConnectionString: "redis:6379"
       ASPNETCORE_ENVIRONMENT: "Production"
     depends_on:
       postgres:
         condition: service_healthy
       rabbitmq:
+        condition: service_healthy
+      redis:
         condition: service_healthy
     restart: on-failure
 
@@ -89,6 +155,10 @@ services:
       RabbitMq__Host: "rabbitmq"
       RabbitMq__Username: "guest"
       RabbitMq__Password: ${RABBITMQ_PASSWORD:-guest}
+      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID:-}
+      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY:-}
+      AWS_REGION: ${AWS_REGION:-us-east-1}
+      Aws__Sqs__PaymentProcessedQueueUrl: ${AWS_SQS_PAYMENT_PROCESSED_QUEUE_URL:-}
       DOTNET_ENVIRONMENT: "Production"
     depends_on:
       postgres:
@@ -97,23 +167,9 @@ services:
         condition: service_healthy
     restart: on-failure
 
-  notifications-worker:
-    build:
-      context: ../fcg-notifications-api
-      dockerfile: Dockerfile
-    container_name: fcg_notifications_worker
-    environment:
-      ConnectionStrings__Postgres: "Host=postgres;Port=5432;Database=fcg_notifications_db;Username=fcg;Password=${POSTGRES_PASSWORD:-fcg_secret}"
-      RabbitMq__Host: "rabbitmq"
-      RabbitMq__Username: "guest"
-      RabbitMq__Password: ${RABBITMQ_PASSWORD:-guest}
-      DOTNET_ENVIRONMENT: "Production"
-    depends_on:
-      postgres:
-        condition: service_healthy
-      rabbitmq:
-        condition: service_healthy
-    restart: on-failure
+  # notifications-worker foi descomissionado na Fase 3: a lógica migrou para uma
+  # função AWS Lambda (repositório fcg-notifications-serverless), acionada pelas
+  # filas SQS que users-api e payments-worker publicam acima (dual-publish).
 
 volumes:
   postgres_data:
