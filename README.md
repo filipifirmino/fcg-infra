@@ -598,3 +598,29 @@ Nenhum segredo é versionado. Os `Secret` do namespace `fcg` (`fcg-shared-secret
 | EKS | `kubectl apply -f k8s/external-secrets/` (External Secrets Operator) | AWS Secrets Manager |
 
 Chaves esperadas no Secrets Manager (JSON): `fcg/jwt` → `secretKey`; `fcg/postgres` → `password`; `fcg/rabbitmq` → `password`; `fcg/grafana` → `password`; `fcg/aws-services` → `accessKeyId`, `secretAccessKey`. As conexões do Postgres são montadas pelo próprio ExternalSecret (`template`), então só a senha é armazenada.
+
+---
+
+## Infraestrutura na AWS (Terraform)
+
+`terraform/` provisiona, na região `us-east-1`: VPC (sub-redes públicas, sem NAT), cluster **EKS** gerenciado com node group (2× `t3.large`) e add-ons (CoreDNS, kube-proxy, VPC CNI, EBS CSI), repositórios **ECR** (`fcg-users-api`, `fcg-catalog-api`, `fcg-payments-api`, com scan on push), tabela **DynamoDB** `fcg-game-reviews`, os *containers* de segredos no **Secrets Manager** (`fcg/*`, sem valores) e as roles IAM: IRSA do External Secrets Operator e a role OIDC do GitHub Actions (push no ECR + deploy no namespace `fcg`).
+
+O OpenSearch **não** é provisionado pelo Terraform: roda como pod (`k8s/opensearch/`), aplicado só para a gravação e removido em seguida.
+
+```bash
+cd terraform
+terraform init
+terraform plan            # ~73 recursos
+terraform apply
+```
+
+Depois do `apply`:
+
+1. Informe os valores dos segredos (fora do repositório), por exemplo:
+   `aws secretsmanager put-secret-value --secret-id fcg/jwt --secret-string '{"secretKey":"..."}'`
+   (formato de cada segredo na seção [Segredos](#segredos)).
+2. `scripts/bootstrap-eks.ps1` — configura o kubeconfig, instala o External Secrets Operator (Helm) e aplica namespace, ExternalSecrets e a plataforma (Postgres, RabbitMQ, Redis, Kong, Prometheus, Grafana).
+3. Cadastre `AWS_ROLE_ARN` (output `github_actions_role_arn`) como variável nos repositórios do GitHub.
+4. Para a demonstração: `kubectl apply -f k8s/opensearch` (e `kubectl delete -f k8s/opensearch` ao final).
+
+**Custo aproximado enquanto ativo:** control plane do EKS (~US$ 0,10/h) + 2× `t3.large` (~US$ 0,17/h) + EBS/KMS — da ordem de US$ 7 por dia. Ao terminar: `terraform destroy` (ECR e segredos têm remoção forçada). O state é local (`terraform.tfstate`, ignorado pelo git): guarde-o até o `destroy`.
