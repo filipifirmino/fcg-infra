@@ -5,3 +5,4 @@ metadata:
   namespace: fcg
 data:
   Redis__ConnectionString: "redis:6379"
+  OpenSearch__Uri: "http://opensearch:9200"
