@@ -9,6 +9,12 @@
         "arn:aws:sqs:us-east-1:122102659912:fcg-user-created",
         "arn:aws:sqs:us-east-1:122102659912:fcg-payment-processed"
       ]
+    },
+    {
+      "Sid": "ReadWriteGameReviews",
+      "Effect": "Allow",
+      "Action": ["dynamodb:PutItem", "dynamodb:Query"],
+      "Resource": "arn:aws:dynamodb:us-east-1:122102659912:table/fcg-game-reviews"
     }
   ]
 }

@@ -153,6 +153,7 @@ services:
       RabbitMq__Password: ${RABBITMQ_PASSWORD:-guest}
       Redis__ConnectionString: "redis:6379"
       OpenSearch__Uri: "http://opensearch:9200"
+      DynamoDb__ReviewsTable: "fcg-game-reviews"
       ASPNETCORE_ENVIRONMENT: "Production"
     depends_on:
       postgres:
