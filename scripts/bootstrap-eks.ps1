@@ -1,5 +1,5 @@
 param(
-    [string]$Profile = "fcg",
+    [string]$AwsProfile = "fcg",
     [string]$Region = "us-east-1"
 )
 
@@ -9,7 +9,7 @@ $root = Join-Path $PSScriptRoot ".."
 $cluster = terraform -chdir="$root/terraform" output -raw cluster_name
 $esoRole = terraform -chdir="$root/terraform" output -raw external_secrets_role_arn
 
-aws eks update-kubeconfig --name $cluster --region $Region --profile $Profile
+aws eks update-kubeconfig --name $cluster --region $Region --profile $AwsProfile
 
 kubectl apply -f "$root/k8s/00-namespace.yaml"
 
