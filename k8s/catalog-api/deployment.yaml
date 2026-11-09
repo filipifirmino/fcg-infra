@@ -4,7 +4,12 @@ metadata:
   name: catalog-api
   namespace: fcg
 spec:
-  replicas: 1
+  replicas: 2
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
   selector:
     matchLabels:
       app: catalog-api
@@ -15,8 +20,8 @@ spec:
     spec:
       containers:
         - name: catalog-api
-          image: fcg-catalog-api:latest
-          imagePullPolicy: Never
+          image: 122102659912.dkr.ecr.us-east-1.amazonaws.com/fcg-catalog-api:latest
+          imagePullPolicy: IfNotPresent
           ports:
             - containerPort: 8080
           envFrom:
@@ -28,3 +33,21 @@ spec:
                 name: fcg-shared-secret
             - secretRef:
                 name: catalog-api-secret
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 10
+            periodSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 30
+            periodSeconds: 10
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              memory: 512Mi

@@ -2,13 +2,14 @@
 
 Repositório de orquestração da plataforma **FIAP Cloud Games (FCG)**. Centraliza o `docker-compose.yml` para execução local completa e todos os manifests Kubernetes para deploy em cluster. Não contém código de aplicação.
 
-> **Tech Challenge Fase 3:** este README documenta a arquitetura já com API Gateway (Kong), a migração da NotificationsAPI para Serverless (AWS Lambda), a stack de observabilidade (**Opção A: Prometheus + Grafana**) e a persistência poliglota (Redis + DynamoDB).
+> **Tech Challenge Fase 4:** além do API Gateway (Kong), da função Serverless e da observabilidade da Fase 3, a plataforma roda em **Kubernetes gerenciado na AWS (EKS)** provisionado por **Terraform**, com imagens no **ECR**, **CI/CD no GitHub Actions** (build, testes, scan, push e rolling update), **persistência poliglota** (PostgreSQL, DynamoDB, Redis), **busca avançada com OpenSearch** e **segredos no AWS Secrets Manager**. Veja [Infraestrutura na AWS](#infraestrutura-na-aws-terraform), [Segredos](#segredos) e [CI/CD](#cicd).
 
 ---
 
 ## Sumário
 
 - [Visão Geral](#visão-geral)
+- [Segredos](#segredos) · [Infraestrutura na AWS (Terraform)](#infraestrutura-na-aws-terraform) · [CI/CD](#cicd)
 - [Arquitetura e Fluxo de Eventos](#arquitetura-e-fluxo-de-eventos)
 - [Pré-requisitos](#pré-requisitos)
 - [Estrutura do Repositório](#estrutura-do-repositório)
@@ -315,6 +316,8 @@ docker compose down -v     # parar e remover volumes (apaga os bancos)
 
 ## Deploy no Kubernetes
 
+> **EKS (produção):** use [Infraestrutura na AWS](#infraestrutura-na-aws-terraform) e o [CI/CD](#cicd). Os Deployments de `users-api` e `catalog-api` apontam para o ECR (`122102659912.dkr.ecr.us-east-1.amazonaws.com`) e são atualizados pelo pipeline. Os passos abaixo valem para um **cluster local**: antes, publique as imagens locais com a tag do ECR (`docker tag fcg-users-api:latest <ecr>/fcg-users-api:latest`) ou ajuste o `image:` dos Deployments.
+
 ### Passo 1 — Habilite o Kubernetes local
 
 Docker Desktop: Settings → Kubernetes → Enable Kubernetes → Apply & Restart. Para Kind/Minikube, consulte a documentação oficial.
@@ -340,7 +343,9 @@ docker build -t fcg-payments-api:latest ./fcg-payments-api
 
 > A `fcg-notifications-serverless` **não** entra nesse build — ela não roda em container, é implantada via `sam deploy` (ver seção [Persistência Poliglota](#persistência-poliglota) e o README do próprio repositório).
 
-### Passo 3 — Personalize os Secrets (opcional)
+### Passo 3 — Crie os Secrets
+
+Preencha o `.env` (a partir do `.env.example`) e rode `scripts/create-secrets.ps1` (ou `.sh`): ele cria no namespace `fcg` todos os Secrets que os manifests esperam. Rode **depois** de aplicar o `00-namespace.yaml` do passo 4.
 
 Config/segredos comuns a mais de um serviço ficam centralizados em `k8s/shared/` — veja a seção [Hierarquia de Configuração e Secrets](#hierarquia-de-configuração-e-secrets) para os detalhes de por que essa separação existe.
 
@@ -360,7 +365,7 @@ cd fcg-infra
 
 kubectl apply -f k8s/00-namespace.yaml
 kubectl apply -f k8s/infra/                # PostgreSQL + RabbitMQ
-kubectl apply -f k8s/shared/                # Config/segredos compartilhados
+kubectl apply -f k8s/shared/configmap.yaml  # Config compartilhada (os Secrets vêm do passo 3)
 kubectl apply -f k8s/redis/                 # Cache do CatalogAPI
 
 kubectl apply -f k8s/users-api/
@@ -380,10 +385,12 @@ kubectl get services -n fcg
 kubectl wait --for=condition=ready pod --all -n fcg --timeout=120s
 ```
 
-### Passo 6 — Acesse via port-forward
+### Passo 6 — Acesse o Kong
+
+No EKS o Service `kong` é um Load Balancer (`kubectl get svc kong -n fcg`, coluna `EXTERNAL-IP`, porta 80). Em cluster local use o port-forward:
 
 ```bash
-kubectl port-forward service/kong 8000:8000 -n fcg          # ponto de entrada real
+kubectl port-forward service/kong 8000:80 -n fcg              # ponto de entrada real
 kubectl port-forward service/grafana 3000:3000 -n fcg
 kubectl port-forward service/prometheus 9090:9090 -n fcg
 kubectl port-forward service/rabbitmq 15672:15672 -n fcg
@@ -435,6 +442,8 @@ Métricas usadas nas queries: `http_request_duration_seconds` (histograma; `_cou
 
 - **Cache distribuído (Redis):** `CatalogAPI` cacheia a listagem de jogos (`games:all`, TTL de 60s) via `IDistributedCache`/`StackExchange.Redis`, com invalidação explícita em criar/atualizar/remover jogo.
 - **NoSQL (DynamoDB):** a função Lambda em `fcg-notifications-serverless` grava cada notificação simulada (boas-vindas, confirmação/rejeição de compra) na tabela `fcg-notification-logs`. Ver o README daquele repositório para o schema e como fazer o deploy (`sam build && sam deploy --guided`).
+- **NoSQL (DynamoDB) no catálogo:** `CatalogAPI` grava as avaliações de jogos na tabela `fcg-game-reviews` (`gameId` + `userId`) via `AWSSDK.DynamoDBv2` — `GET/POST /api/v1/games/{id}/reviews`.
+- **Busca avançada (OpenSearch):** `CatalogAPI` indexa cada jogo criado/editado/removido e `/api/v1/games/search` consulta só o índice (fuzzy search + ordenação por relevância). Em produção o OpenSearch roda como pod (`k8s/opensearch/`), aplicado só durante a demonstração e removido depois, para evitar custo.
 
 ---
 
@@ -487,7 +496,7 @@ Mesmas variáveis de RabbitMQ, mais:
 
 ## Endpoints (via Kong)
 
-Ponto de entrada único: **`http://localhost:8000`** (local) ou o endereço do Service `kong` no cluster.
+Ponto de entrada único: **`http://localhost:8000`** (Docker Compose) ou o DNS do Load Balancer do Service `kong` no EKS (`kubectl get svc kong -n fcg`, porta 80).
 
 | Método | Rota | Auth | Serviço |
 |---|---|---|---|
@@ -501,6 +510,7 @@ Ponto de entrada único: **`http://localhost:8000`** (local) ou o endereço do S
 | `POST` | `/api/v1/games` | JWT (Admin) | CatalogAPI |
 | `PATCH` \| `DELETE` | `/api/v1/games/{id}` | JWT (Admin) | CatalogAPI |
 | `POST` | `/api/v1/games/{id}/acquire` | JWT | CatalogAPI → retorna 202 |
+| `GET` | `POST` | `/api/v1/games/{id}/reviews` | JWT | CatalogAPI (DynamoDB) |
 
 > `Email` e `Password` são Value Objects — o corpo de `register`/`login` precisa envolver o valor: `{ "email": { "value": "..." }, "password": { "value": "..." } }`.
 >
@@ -538,7 +548,7 @@ docker desktop kubernetes reset-cluster
 # 2. Rebuilde as imagens e reaplique os manifests
 ./fcg-infra/scripts/build-all.sh
 kubectl apply -f k8s/00-namespace.yaml
-kubectl apply -f k8s/infra/ && kubectl apply -f k8s/shared/
+kubectl apply -f k8s/infra/ && kubectl apply -f k8s/shared/configmap.yaml
 kubectl apply -f k8s/users-api/ && kubectl apply -f k8s/catalog-api/ && kubectl apply -f k8s/payments-worker/
 ```
 
@@ -624,3 +634,37 @@ Depois do `apply`:
 4. Para a demonstração: `kubectl apply -f k8s/opensearch` (e `kubectl delete -f k8s/opensearch` ao final).
 
 **Custo aproximado enquanto ativo:** control plane do EKS (~US$ 0,10/h) + 2× `t3.large` (~US$ 0,17/h) + EBS/KMS — da ordem de US$ 7 por dia. Ao terminar: `terraform destroy` (ECR e segredos têm remoção forçada). O state é local (`terraform.tfstate`, ignorado pelo git): guarde-o até o `destroy`.
+
+---
+
+## CI/CD
+
+Cada serviço (hoje `fcg-users-api` e `fcg-catalog-api`) tem um `.github/workflows/ci-cd.yml` de poucas linhas que chama o workflow reutilizável `.github/workflows/dotnet-service-cicd.yml` deste repositório:
+
+| Etapa | O que faz | Quando |
+|---|---|---|
+| `test` | `dotnet restore/build/test` (inclui testes de integração com Testcontainers) | push e pull request |
+| `build-and-push` | `docker build` com tags `<sha curto>` e `latest`, **scan Trivy** (falha em CRITICAL/HIGH com correção disponível) e push no ECR | push em `main` |
+| `deploy` | `kubectl set image` no Deployment, `rollout status` e `rollout undo` em caso de falha | push em `main`, ambiente `production` |
+
+Os Deployments usam `RollingUpdate` com `maxUnavailable: 0`, 2 réplicas e probes `readiness`/`liveness` em `/health`, então a atualização ocorre sem downtime. A autenticação na AWS é por **OIDC** (sem chaves de acesso no GitHub): configure a variável `AWS_ROLE_ARN` em cada repositório e um *environment* `production`. Se este repositório for privado, habilite em *Settings → Actions → Access* o uso dos workflows por outros repositórios.
+
+Os manifests de `k8s/` são a fonte única do que roda no cluster; os repositórios dos serviços não mantêm cópias.
+
+---
+
+## Relatório de Entrega (rascunho)
+
+- **Grupo:** 14 — integrantes e usernames no Discord: _preencher_
+- **Documentação:** este README e os READMEs de cada serviço
+- **Repositórios:** `fcg-infra`, `fcg-users-api`, `fcg-catalog-api`, `fcg-payments-api`, `fcg-notifications-api`, `fcg-notifications-serverless` (GitHub `filipifirmino`)
+- **Vídeo (YouTube/Drive):** _preencher_
+
+| Requisito do desafio | Onde está |
+|---|---|
+| Kubernetes gerenciado + registry privado + exposição | `terraform/` (EKS, ECR), `k8s/kong/service.yaml` (Load Balancer) |
+| NoSQL com driver oficial | DynamoDB (`AWSSDK.DynamoDBv2`) — avaliações no CatalogAPI |
+| Cache distribuído | Redis (`IDistributedCache`) no CatalogAPI |
+| Busca com fuzzy e relevância | OpenSearch no CatalogAPI (`/api/v1/games/search`) |
+| CI/CD (build, teste, imagem versionada, scan, push, rolling update) | `.github/workflows/` |
+| Zero credenciais no código | AWS Secrets Manager + External Secrets Operator (`k8s/external-secrets/`) |

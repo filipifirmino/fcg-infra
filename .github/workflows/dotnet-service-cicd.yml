@@ -1,0 +1,88 @@
+name: dotnet-service-cicd
+
+on:
+  workflow_call:
+    inputs:
+      solution:
+        description: Solution ou projeto de testes a compilar e testar
+        type: string
+        required: true
+      ecr-repository:
+        description: Nome do repositório no ECR
+        type: string
+        required: true
+      deployment:
+        description: Nome do Deployment (e do container) no namespace fcg
+        type: string
+        required: true
+
+env:
+  AWS_REGION: us-east-1
+  CLUSTER_NAME: fcg-cluster
+  NAMESPACE: fcg
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.x
+      - run: dotnet restore ${{ inputs.solution }}
+      - run: dotnet build ${{ inputs.solution }} --no-restore -c Release
+      - run: dotnet test ${{ inputs.solution }} --no-build -c Release
+
+  build-and-push:
+    needs: test
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: read
+    outputs:
+      image: ${{ steps.meta.outputs.image }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+      - id: ecr
+        uses: aws-actions/amazon-ecr-login@v2
+      - id: meta
+        run: |
+          repository="${{ steps.ecr.outputs.registry }}/${{ inputs.ecr-repository }}"
+          echo "repository=$repository" >> "$GITHUB_OUTPUT"
+          echo "image=$repository:${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
+      - run: docker build -t "${{ steps.meta.outputs.image }}" -t "${{ steps.meta.outputs.repository }}:latest" .
+      - uses: aquasecurity/trivy-action@0.28.0
+        with:
+          image-ref: ${{ steps.meta.outputs.image }}
+          severity: CRITICAL,HIGH
+          ignore-unfixed: true
+          exit-code: "1"
+      - run: |
+          docker push "${{ steps.meta.outputs.image }}"
+          docker push "${{ steps.meta.outputs.repository }}:latest"
+
+  deploy:
+    needs: build-and-push
+    runs-on: ubuntu-latest
+    environment: production
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+      - run: aws eks update-kubeconfig --name "$CLUSTER_NAME" --region "$AWS_REGION"
+      - run: kubectl -n "$NAMESPACE" set image "deployment/${{ inputs.deployment }}" "${{ inputs.deployment }}=${{ needs.build-and-push.outputs.image }}"
+      - name: Aguarda o rolling update (desfaz em caso de falha)
+        run: |
+          if ! kubectl -n "$NAMESPACE" rollout status "deployment/${{ inputs.deployment }}" --timeout=300s; then
+            kubectl -n "$NAMESPACE" rollout undo "deployment/${{ inputs.deployment }}"
+            exit 1
+          fi
