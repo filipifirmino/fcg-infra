@@ -43,9 +43,12 @@ resource "aws_iam_role" "github_actions" {
       Condition = {
         StringEquals = { "token.actions.githubusercontent.com:aud" = "sts.amazonaws.com" }
         StringLike = {
-          "token.actions.githubusercontent.com:sub" = [
-            for repository in var.github_repositories : "repo:${var.github_owner}/${repository}:ref:refs/heads/main"
-          ]
+          "token.actions.githubusercontent.com:sub" = flatten([
+            for repository in var.github_repositories : [
+              "repo:${var.github_owner}/${repository}:ref:refs/heads/main",
+              "repo:${var.github_owner}/${repository}:environment:production"
+            ]
+          ])
         }
       }
     }]
