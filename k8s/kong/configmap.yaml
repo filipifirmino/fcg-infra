@@ -37,7 +37,7 @@ data:
       - username: fcg-client
         jwt_secrets:
           # "key" precisa bater com o claim "iss" emitido pelo UsersAPI (Jwt:Issuer).
-          # "secret" precisa ser IDÊNTICO ao Jwt__SecretKey (fcg-shared-secret).
+          # "secret" precisa ser IDÊNTICO ao Jwt__SecretKey (fcg-shared-secret). O placeholder é substituído na subida do pod.
           - key: FCG.Api
             algorithm: HS256
-            secret: UvPTu5UZIcSe0V1onJSNTWT579OHlmoxXA1flLgKpow=
+            secret: __JWT_SECRET__

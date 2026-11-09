@@ -223,27 +223,16 @@ fcg-infra/
 
 ### Passo 1 — Configure as variáveis de ambiente
 
-O repositório já inclui um `.env` com valores padrão prontos para desenvolvimento local.
+Copie o template e preencha os valores (o `.env` está no `.gitignore` e nunca deve ser commitado):
 
-```env
-# JWT compartilhada entre UsersAPI e CatalogAPI
-JWT_SECRET=UvPTu5UZIcSe0V1onJSNTWT579OHlmoxXA1flLgKpow=
-
-# PostgreSQL / RabbitMQ
-POSTGRES_PASSWORD=fcg_secret
-RABBITMQ_PASSWORD=guest
-
-# Credenciais do IAM user "fcg-services" (dual-publish para a Lambda de notificações)
-AWS_ACCESS_KEY_ID=...
-AWS_SECRET_ACCESS_KEY=...
-AWS_REGION=us-east-1
-
-# URLs reais das filas SQS — saem do "sam deploy" em fcg-notifications-serverless
-AWS_SQS_USER_CREATED_QUEUE_URL=https://sqs.us-east-1.amazonaws.com/<account-id>/fcg-user-created
-AWS_SQS_PAYMENT_PROCESSED_QUEUE_URL=https://sqs.us-east-1.amazonaws.com/<account-id>/fcg-payment-processed
+```bash
+cp .env.example .env
+openssl rand -base64 32   # use para JWT_SECRET; gere senhas fortes para as demais
 ```
 
-> ⚠️ Este `.env` fica versionado no repositório com valores reais de desenvolvimento (mesma prática já adotada desde a Fase 2) — servem só para ambiente local, nunca reutilize em produção. Sem as duas últimas variáveis preenchidas, `UsersAPI`/`PaymentsAPI` sobem normalmente — o dual-publish só loga um aviso e segue sem tentar enviar ao SQS.
+O `docker compose` **falha ao subir** se `JWT_SECRET`, `POSTGRES_PASSWORD`, `RABBITMQ_PASSWORD` ou `GRAFANA_ADMIN_PASSWORD` estiverem vazias — não há mais valores padrão embutidos. As variáveis `AWS_*` são as credenciais do IAM user `fcg-services` (dual-publish para a Lambda) e as URLs reais das filas SQS (saem do `sam deploy` em `fcg-notifications-serverless`).
+
+> ⚠️ Nunca grave segredos em arquivos versionados. O Kong recebe o segredo JWT por variável de ambiente (`JWT_SECRET`) e o injeta em `/tmp/kong.yml` na subida do container.
 
 ### Passo 2 — Suba todos os serviços
 
@@ -356,11 +345,11 @@ docker build -t fcg-payments-api:latest ./fcg-payments-api
 Config/segredos comuns a mais de um serviço ficam centralizados em `k8s/shared/` — veja a seção [Hierarquia de Configuração e Secrets](#hierarquia-de-configuração-e-secrets) para os detalhes de por que essa separação existe.
 
 - `k8s/shared/configmap.yaml` — Jwt Issuer/Audience/ExpirationMinutes, RabbitMq Host/Username, **URLs das filas SQS**.
-- `k8s/shared/secret.yaml` — Jwt SecretKey, RabbitMq Password, **credenciais do IAM user `fcg-services`** (`AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY`/`AWS_REGION` — nomes exigidos pela cadeia de resolução de credenciais do AWS SDK, não pelo padrão `Config__Nested` usado no resto do arquivo).
+- **Secret `fcg-shared-secret`** (não versionado; ver [Segredos](#segredos)) — Jwt SecretKey, RabbitMq Password, **credenciais do IAM user `fcg-services`** (`AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY`/`AWS_REGION` — nomes exigidos pela cadeia de resolução de credenciais do AWS SDK, não pelo padrão `Config__Nested` usado no resto do arquivo).
 
 O que resta em cada pasta por serviço é só o que é exclusivo dele (connection string do Postgres, e no caso do CatalogAPI, também `Redis__ConnectionString`).
 
-> Se trocar `Jwt__SecretKey`, também precisa atualizar a credencial JWT do Kong em `k8s/kong/configmap.yaml` (campo `secret`) — veja a nota de JWT na seção de Troubleshooting.
+> O Kong lê o segredo JWT do mesmo `fcg-shared-secret` (variável `JWT_SECRET`), então trocar `Jwt__SecretKey` basta: reinicie o pod do Kong.
 
 ### Passo 4 — Aplique os manifests
 
@@ -467,9 +456,9 @@ Para evitar divergências, os arquivos `secret.yaml` e `configmap.yaml` adotam u
 | Variável | Exemplo | Origem |
 |---|---|---|
 | `ConnectionStrings__Postgres` | `Host=postgres;...` | Secret próprio |
-| `Jwt__SecretKey` | `UvPTu5UZ...` | `fcg-shared-secret` |
+| `Jwt__SecretKey` | — | `fcg-shared-secret` |
 | `Jwt__Issuer` / `Jwt__Audience` / `Jwt__ExpirationMinutes` | `FCG.Api` / `FCG.Client` / `60` | `fcg-shared-config` |
-| `RabbitMq__Host` / `Username` / `Password` | `rabbitmq` / `guest` / `guest` | `fcg-shared-config` / `fcg-shared-secret` |
+| `RabbitMq__Host` / `Username` / `Password` | `rabbitmq` / `guest` / — | `fcg-shared-config` / `fcg-shared-secret` |
 | `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` / `AWS_REGION` | — | `fcg-shared-secret` |
 | `Aws__Sqs__UserCreatedQueueUrl` | `https://sqs.us-east-1.amazonaws.com/.../fcg-user-created` | `fcg-shared-config` |
 
@@ -596,3 +585,16 @@ Para detalhes específicos sobre a lógica de domínio, padrões arquiteturais e
 Projeto desenvolvido para o **Tech Challenge — Fase 3** da pós-graduação em **Full Stack Developer** — FIAP.
 
 **Tecnologias:** .NET 10 (.NET 8 na Lambda) · ASP.NET Core · Entity Framework Core · PostgreSQL · RabbitMQ · MassTransit · Redis · Kong · Prometheus · Grafana · AWS Lambda · Amazon SQS · Amazon DynamoDB · Docker · Kubernetes
+
+---
+
+## Segredos
+
+Nenhum segredo é versionado. Os `Secret` do namespace `fcg` (`fcg-shared-secret`, `catalog-api-secret`, `users-api-secret`, `payments-worker-secret`, `postgres-secret`, `rabbitmq-secret`, `grafana-secret`) são criados de duas formas, com os mesmos nomes e chaves:
+
+| Ambiente | Como | Origem |
+|---|---|---|
+| Cluster local | `scripts/create-secrets.ps1` (ou `.sh`) | `.env` local (gitignored) |
+| EKS | `kubectl apply -f k8s/external-secrets/` (External Secrets Operator) | AWS Secrets Manager |
+
+Chaves esperadas no Secrets Manager (JSON): `fcg/jwt` → `secretKey`; `fcg/postgres` → `password`; `fcg/rabbitmq` → `password`; `fcg/grafana` → `password`; `fcg/aws-services` → `accessKeyId`, `secretAccessKey`. As conexões do Postgres são montadas pelo próprio ExternalSecret (`template`), então só a senha é armazenada.

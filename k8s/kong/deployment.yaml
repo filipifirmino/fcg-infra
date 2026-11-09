@@ -16,6 +16,9 @@ spec:
       containers:
         - name: kong
           image: kong:latest
+          command: ["/bin/sh", "-c"]
+          args:
+            - sed "s#__JWT_SECRET__#${JWT_SECRET}#" /kong/declarative/kong.yml > /tmp/kong.yml && exec /docker-entrypoint.sh kong docker-start
           ports:
             - name: proxy
               containerPort: 8000
@@ -25,7 +28,12 @@ spec:
             - name: KONG_DATABASE
               value: "off"
             - name: KONG_DECLARATIVE_CONFIG
-              value: /kong/declarative/kong.yml
+              value: /tmp/kong.yml
+            - name: JWT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: fcg-shared-secret
+                  key: Jwt__SecretKey
             - name: KONG_PROXY_ACCESS_LOG
               value: /dev/stdout
             - name: KONG_ADMIN_ACCESS_LOG

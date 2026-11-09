@@ -4,7 +4,7 @@ services:
     container_name: fcg_postgres
     environment:
       POSTGRES_USER: fcg
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-fcg_secret}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?defina POSTGRES_PASSWORD no .env}
     ports:
       - "5432:5432"
     volumes:
@@ -24,7 +24,7 @@ services:
       - "15672:15672"
     environment:
       RABBITMQ_DEFAULT_USER: guest
-      RABBITMQ_DEFAULT_PASS: ${RABBITMQ_PASSWORD:-guest}
+      RABBITMQ_DEFAULT_PASS: ${RABBITMQ_PASSWORD:?defina RABBITMQ_PASSWORD no .env}
     healthcheck:
       test: ["CMD", "rabbitmq-diagnostics", "ping"]
       interval: 10s
@@ -66,12 +66,16 @@ services:
     container_name: fcg_kong
     environment:
       KONG_DATABASE: "off"
-      KONG_DECLARATIVE_CONFIG: /kong/declarative/kong.yml
+      KONG_DECLARATIVE_CONFIG: /tmp/kong.yml
+      JWT_SECRET: ${JWT_SECRET:?defina JWT_SECRET no .env}
       KONG_PROXY_ACCESS_LOG: /dev/stdout
       KONG_ADMIN_ACCESS_LOG: /dev/stdout
       KONG_PROXY_ERROR_LOG: /dev/stderr
       KONG_ADMIN_ERROR_LOG: /dev/stderr
       KONG_ADMIN_LISTEN: 0.0.0.0:8001
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - sed "s#__JWT_SECRET__#$${JWT_SECRET}#" /kong/declarative/kong.yml > /tmp/kong.yml && exec /docker-entrypoint.sh kong docker-start
     volumes:
       - ./gateway/kong.yml:/kong/declarative/kong.yml:ro
     ports:
@@ -98,7 +102,7 @@ services:
       - "3000:3000"
     environment:
       GF_SECURITY_ADMIN_USER: admin
-      GF_SECURITY_ADMIN_PASSWORD: admin
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:?defina GRAFANA_ADMIN_PASSWORD no .env}
       GF_AUTH_ANONYMOUS_ENABLED: "true"
       GF_AUTH_ANONYMOUS_ORG_ROLE: Viewer
     volumes:
@@ -116,14 +120,14 @@ services:
     ports:
       - "8080:8080"
     environment:
-      ConnectionStrings__Postgres: "Host=postgres;Port=5432;Database=fcg_users_db;Username=fcg;Password=${POSTGRES_PASSWORD:-fcg_secret}"
-      Jwt__SecretKey: ${JWT_SECRET}
+      ConnectionStrings__Postgres: "Host=postgres;Port=5432;Database=fcg_users_db;Username=fcg;Password=${POSTGRES_PASSWORD:?defina POSTGRES_PASSWORD no .env}"
+      Jwt__SecretKey: ${JWT_SECRET:?defina JWT_SECRET no .env}
       Jwt__Issuer: "FCG.Api"
       Jwt__Audience: "FCG.Client"
       Jwt__ExpirationMinutes: "60"
       RabbitMq__Host: "rabbitmq"
       RabbitMq__Username: "guest"
-      RabbitMq__Password: ${RABBITMQ_PASSWORD:-guest}
+      RabbitMq__Password: ${RABBITMQ_PASSWORD:?defina RABBITMQ_PASSWORD no .env}
       AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID:-}
       AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY:-}
       AWS_REGION: ${AWS_REGION:-us-east-1}
@@ -144,13 +148,13 @@ services:
     ports:
       - "8081:8080"
     environment:
-      ConnectionStrings__Postgres: "Host=postgres;Port=5432;Database=fcg_catalog_db;Username=fcg;Password=${POSTGRES_PASSWORD:-fcg_secret}"
-      Jwt__SecretKey: ${JWT_SECRET}
+      ConnectionStrings__Postgres: "Host=postgres;Port=5432;Database=fcg_catalog_db;Username=fcg;Password=${POSTGRES_PASSWORD:?defina POSTGRES_PASSWORD no .env}"
+      Jwt__SecretKey: ${JWT_SECRET:?defina JWT_SECRET no .env}
       Jwt__Issuer: "FCG.Api"
       Jwt__Audience: "FCG.Client"
       RabbitMq__Host: "rabbitmq"
       RabbitMq__Username: "guest"
-      RabbitMq__Password: ${RABBITMQ_PASSWORD:-guest}
+      RabbitMq__Password: ${RABBITMQ_PASSWORD:?defina RABBITMQ_PASSWORD no .env}
       Redis__ConnectionString: "redis:6379"
       OpenSearch__Uri: "http://opensearch:9200"
       DynamoDb__ReviewsTable: "fcg-game-reviews"
@@ -172,10 +176,10 @@ services:
       dockerfile: Dockerfile
     container_name: fcg_payments_worker
     environment:
-      ConnectionStrings__Postgres: "Host=postgres;Port=5432;Database=fcg_payments_db;Username=fcg;Password=${POSTGRES_PASSWORD:-fcg_secret}"
+      ConnectionStrings__Postgres: "Host=postgres;Port=5432;Database=fcg_payments_db;Username=fcg;Password=${POSTGRES_PASSWORD:?defina POSTGRES_PASSWORD no .env}"
       RabbitMq__Host: "rabbitmq"
       RabbitMq__Username: "guest"
-      RabbitMq__Password: ${RABBITMQ_PASSWORD:-guest}
+      RabbitMq__Password: ${RABBITMQ_PASSWORD:?defina RABBITMQ_PASSWORD no .env}
       AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID:-}
       AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY:-}
       AWS_REGION: ${AWS_REGION:-us-east-1}

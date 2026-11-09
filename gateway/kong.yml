@@ -36,4 +36,4 @@ consumers:
       # do SymmetricSecurityKey do .NET, que usa a string como bytes UTF-8 crus.
       - key: FCG.Api
         algorithm: HS256
-        secret: UvPTu5UZIcSe0V1onJSNTWT579OHlmoxXA1flLgKpow=
+        secret: __JWT_SECRET__

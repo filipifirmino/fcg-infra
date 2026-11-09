@@ -405,3 +405,9 @@ Claude.md
 
 # Git
 .gitignore
+
+# Segredos: nunca versionar (ver .env.example e k8s/external-secrets)
+.env
+k8s/**/secret.yaml
+k8s/**/*-secret.yaml
+!k8s/external-secrets/
