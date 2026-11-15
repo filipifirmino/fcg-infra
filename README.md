@@ -19,7 +19,7 @@ Repositório de orquestração da plataforma **FIAP Cloud Games (FCG)**. Central
 - [Persistência Poliglota](#persistência-poliglota)
 - [Hierarquia de Configuração e Secrets](#hierarquia-de-configuração-e-secrets)
 - [Variáveis de Ambiente](#variáveis-de-ambiente)
-- [Endpoints (via Kong)](#endpoints-via-kong)
+- [Endpoints (via Kong)](#endpoints-via-kong) · [Testes com Postman](#testes-com-postman)
 - [Troubleshooting](#troubleshooting)
 - [Documentação Detalhada dos Serviços](#documentação-detalhada-dos-serviços)
 
@@ -31,18 +31,19 @@ A FCG é composta por microsserviços independentes por trás de um **API Gatewa
 
 | Componente | Repositório | Tipo | Onde roda |
 |---|---|---|---|
-| Kong | `fcg-infra` (`k8s/kong/`) | API Gateway | Kubernetes local |
-| UsersAPI | `fcg-users-api` | Web API | Kubernetes local |
-| CatalogAPI | `fcg-catalog-api` | Web API | Kubernetes local |
-| PaymentsAPI | `fcg-payments-api` | Worker Service | Kubernetes local |
+| Kong | `fcg-infra` (`k8s/kong/`) | API Gateway | **EKS** (Load Balancer) ou Kubernetes local |
+| UsersAPI | `fcg-users-api` | Web API | **EKS** (CI/CD) ou Kubernetes local |
+| CatalogAPI | `fcg-catalog-api` | Web API | **EKS** (CI/CD) ou Kubernetes local |
+| PaymentsAPI | `fcg-payments-api` | Worker Service | Kubernetes local (sem pipeline) |
 | Notifications | `fcg-notifications-serverless` | Função Lambda | **AWS real** |
 | ~~NotificationsAPI~~ | `fcg-notifications-api` | ~~Worker Service~~ | **Descomissionado na Fase 3** — substituído pela Lambda acima |
 
-**Infraestrutura compartilhada (Kubernetes local):**
+**Infraestrutura compartilhada (EKS ou Kubernetes local):**
 
 | Serviço | Porta | Finalidade |
 |---|---|---|
-| Kong | `8000` (proxy) / `8001` (admin) | Ponto de entrada único, validação de JWT, roteamento |
+| Kong | `8000` (proxy; `80` no Load Balancer) / `8001` (admin, só interno) | Ponto de entrada único, validação de JWT, roteamento |
+| OpenSearch 2.17 | `9200` | Busca fuzzy do CatalogAPI (pod, aplicado só na demonstração) |
 | PostgreSQL 16 | `5432` | Banco relacional (1 DB por serviço, 1 instância) |
 | RabbitMQ 3 | `5672` / `15672` | Broker de mensagens entre os microsserviços |
 | Redis 7 | `6379` | Cache distribuído (listagem de jogos do CatalogAPI) |
@@ -157,7 +158,8 @@ Cliente → POST /api/v1/games/{id}/acquire  (via Kong, JWT obrigatório)
 | Docker Compose | v2 (incluso no Desktop) | — |
 | kubectl | 1.28+ | [kubernetes.io/docs/tasks/tools](https://kubernetes.io/docs/tasks/tools/) |
 | Kubernetes local | qualquer | Docker Desktop K8s, Kind, Minikube ou k3d |
-| .NET SDK | 10.0 (e 8.0 só para a Lambda) | Apenas para build fora do Docker |
+| Terraform, Helm 3 e GitHub CLI | 1.6+ / 3.x / 2.x | Só para provisionar o EKS e configurar o GitHub (veja [Infraestrutura na AWS](#infraestrutura-na-aws-terraform)); `docker run` das imagens oficiais também serve |
+| .NET SDK | 10.0 | Apenas para build fora do Docker |
 | AWS CLI | v2 | [instruções oficiais](https://docs.aws.amazon.com/cli/latest/userguide/getting-started-install.html) |
 | AWS SAM CLI | qualquer recente | [instruções oficiais](https://docs.aws.amazon.com/serverless-application-model/latest/developerguide/install-sam-cli.html) |
 
@@ -174,7 +176,7 @@ FIAP - MS/                          ← pasta raiz
 ├── fcg-notifications-serverless/   ← Fase 3: função Lambda + IaC (SAM)
 └── fcg-infra/                      ← este repositório
     ├── docker-compose.yml
-    ├── .env
+    ├── .env                        ← criado por você a partir do .env.example
     ├── gateway/
     ├── monitoring/
     └── k8s/
@@ -188,11 +190,19 @@ FIAP - MS/                          ← pasta raiz
 
 ```
 fcg-infra/
-├── docker-compose.yml              # Orquestração local (9 serviços)
-├── .env                            # Variáveis de ambiente (valores de dev já preenchidos)
+├── docker-compose.yml              # Orquestração local (Postgres, RabbitMQ, Redis, OpenSearch, Kong, APIs, observabilidade)
+├── .env.example                    # Modelo das variáveis obrigatórias (o .env real é gitignored)
+├── .github/workflows/
+│   └── dotnet-service-cicd.yml     # Workflow reutilizável de CI/CD (test, build, Trivy, push ECR, deploy EKS)
+├── terraform/                      # VPC, EKS, ECR, DynamoDB, Secrets Manager e roles IAM (IRSA e OIDC do GitHub)
+├── postman/
+│   ├── FCG-Fase4.postman_collection.json   # 20 requisições com testes (health, auth, catálogo, busca, avaliações)
+│   └── FCG-EKS.postman_environment.json    # baseUrl (NLB do Kong) e senha de demonstração
 ├── scripts/
-│   ├── build-all.sh
-│   └── build-all.ps1
+│   ├── build-all.sh / build-all.ps1        # Build das imagens locais
+│   ├── create-secrets.sh / .ps1            # Cria os Secrets no cluster local a partir do .env
+│   ├── bootstrap-eks.ps1                   # Instala External Secrets e aplica a plataforma no EKS
+│   └── configure-github.ps1                # AWS_ROLE_ARN, AWS_REGION e environment "production" nos repositórios
 ├── gateway/
 │   └── kong.yml                    # Config declarativo do Kong (usado pelo docker-compose)
 ├── monitoring/
@@ -202,11 +212,14 @@ fcg-infra/
 │       └── dashboards/
 │           └── fcg-overview.json   # Dashboard: request rate, status code, p95, taxa de erro
 ├── aws/
-│   └── fcg-services-policy.json    # IAM policy mínima (sqs:SendMessage) do usuário fcg-services
+│   └── fcg-services-policy.json    # IAM policy mínima do usuário fcg-services (sqs:SendMessage nas filas; PutItem/Query em fcg-game-reviews)
 └── k8s/
     ├── 00-namespace.yaml            # Namespace "fcg" (precisa ser aplicado primeiro)
     ├── infra/                       # PostgreSQL + RabbitMQ
-    ├── shared/                      # Config/segredos comuns: JWT, RabbitMQ, credenciais AWS, URLs das filas SQS
+    ├── eks/                         # StorageClass gp3 (EBS CSI, xfs) — só para o EKS, aplicado pelo bootstrap-eks.ps1
+    ├── external-secrets/            # ClusterSecretStore + ExternalSecrets (AWS Secrets Manager) — só EKS
+    ├── opensearch/                  # Pod do OpenSearch (aplicado só na demonstração)
+    ├── shared/                      # Config comum: JWT (Issuer/Audience), RabbitMQ, URLs das filas SQS (o segredo vem do Secret, não versionado)
     ├── redis/                       # Cache distribuído (Fase 3)
     ├── kong/                        # API Gateway (Fase 3) — mesmo config do gateway/kong.yml, adaptado para o cluster
     ├── prometheus/                  # Observabilidade Opção A (Fase 3)
@@ -367,6 +380,7 @@ kubectl apply -f k8s/00-namespace.yaml
 kubectl apply -f k8s/infra/                # PostgreSQL + RabbitMQ
 kubectl apply -f k8s/shared/configmap.yaml  # Config compartilhada (os Secrets vêm do passo 3)
 kubectl apply -f k8s/redis/                 # Cache do CatalogAPI
+kubectl apply -f k8s/opensearch/            # Busca do CatalogAPI (precisa subir antes do catalog-api)
 
 kubectl apply -f k8s/users-api/
 kubectl apply -f k8s/catalog-api/
@@ -449,12 +463,12 @@ Métricas usadas nas queries: `http_request_duration_seconds` (histograma; `_cou
 
 ## Hierarquia de Configuração e Secrets
 
-Para evitar divergências, os arquivos `secret.yaml` e `configmap.yaml` adotam uma estrutura hierárquica:
+Para evitar divergências, os `Secret` e os `ConfigMap` adotam uma estrutura hierárquica:
 
-- **Shared (`k8s/shared/`):** configurações e segredos comuns a mais de um serviço — JWT (Issuer/Audience/SecretKey), RabbitMQ (Host/Username/Password), credenciais AWS e URLs das filas SQS. O que estiver aqui **deve ser idêntico** entre os serviços: se trocar o `Jwt__SecretKey`, o token emitido pelo UsersAPI continua sendo aceito pelo CatalogAPI porque os dois leem do mesmo lugar via `envFrom`.
-- **Service Specific (`k8s/<servico>/`):** o que resta em cada pasta por serviço é só o que é exclusivo dele — normalmente a connection string do Postgres, e no caso do CatalogAPI, também o `Redis__ConnectionString`.
+- **Shared (`k8s/shared/`):** configuração comum a mais de um serviço — JWT (Issuer/Audience/ExpirationMinutes), RabbitMQ (Host/Username) e URLs das filas SQS (`configmap.yaml`). Os valores sensíveis comuns (`Jwt__SecretKey`, `RabbitMq__Password`, credenciais AWS) ficam no Secret `fcg-shared-secret`. O que estiver aqui **deve ser idêntico** entre os serviços: se trocar o `Jwt__SecretKey`, o token emitido pelo UsersAPI continua sendo aceito pelo CatalogAPI porque os dois leem do mesmo lugar via `envFrom`.
+- **Service Specific (`k8s/<servico>/`):** o que resta em cada pasta por serviço é só o que é exclusivo dele — a connection string do Postgres (Secret próprio) e, no CatalogAPI, o `configmap.yaml` com `Redis__ConnectionString`, `OpenSearch__Uri` e `DynamoDb__ReviewsTable`.
 
-> **Segurança:** os valores atuais em `k8s/*/secret.yaml` e `.env` são de desenvolvimento (a mesma prática desde a Fase 2 — dev secrets versionados para facilitar a correção/avaliação). Em qualquer ambiente real, gere valores próprios (`openssl rand -base64 32` para o JWT) e nunca reutilize os deste repositório.
+> **Segurança:** nenhum segredo é versionado — nem `.env` nem `secret.yaml` (ambos no `.gitignore`). Os Secrets nascem do `.env` local (cluster local) ou do AWS Secrets Manager via External Secrets (EKS); veja [Segredos](#segredos). O histórico antigo do git ainda contém valores de desenvolvimento das fases anteriores, que **não devem ser reutilizados**: gere valores próprios (`openssl rand -base64 32` para o JWT).
 
 ---
 
@@ -478,6 +492,9 @@ Mesmas variáveis de JWT/RabbitMQ do UsersAPI (com `Jwt__Issuer` = `FCG.UsersAPI
 | Variável | Exemplo | Origem |
 |---|---|---|
 | `Redis__ConnectionString` | `redis:6379` | `catalog-api-config` (próprio do serviço, não é `shared` porque só o CatalogAPI usa Redis hoje) |
+| `OpenSearch__Uri` | `http://opensearch:9200` | `catalog-api-config` |
+| `DynamoDb__ReviewsTable` | `fcg-game-reviews` | `catalog-api-config` |
+| `DynamoDb__ServiceUrl` | vazio no EKS (usa a AWS real) | opcional, só para DynamoDB local |
 
 ### PaymentsAPI (Worker)
 
@@ -512,11 +529,23 @@ Ponto de entrada único: **`http://localhost:8000`** (Docker Compose) ou o DNS d
 | `POST` | `/api/v1/games` | JWT (Admin) | CatalogAPI |
 | `PATCH` \| `DELETE` | `/api/v1/games/{id}` | JWT (Admin) | CatalogAPI |
 | `POST` | `/api/v1/games/{id}/acquire` | JWT | CatalogAPI → retorna 202 |
-| `GET` | `POST` | `/api/v1/games/{id}/reviews` | JWT | CatalogAPI (DynamoDB) |
+| `GET` \| `POST` | `/api/v1/games/{id}/reviews` | JWT | CatalogAPI (DynamoDB) |
 
-> `Email` e `Password` são Value Objects — o corpo de `register`/`login` precisa envolver o valor: `{ "email": { "value": "..." }, "password": { "value": "..." } }`.
+> `Email` e `Password` são Value Objects — o corpo de `register`/`login` precisa envolver o valor: `{ "email": { "value": "..." }, "password": { "value": "..." } }`. Credenciais inválidas no login retornam `401`.
 >
-> `/metrics` e `/health` de cada serviço não passam pelo Kong — são acessados direto pelo Prometheus via Service do Kubernetes.
+> `/metrics` e o `/health` de cada serviço são acessados direto pelo Prometheus via Service do Kubernetes; externamente só os health checks `/health/users` e `/health/catalog` passam pelo Kong. Qualquer outra rota sem correspondência responde `404 no Route matched`.
+
+### Testes com Postman
+
+Importe `postman/FCG-Fase4.postman_collection.json` e o environment `postman/FCG-EKS.postman_environment.json` (ajuste `baseUrl` para o DNS do Load Balancer: `kubectl get svc kong -n fcg`). A coleção tem 20 requisições com asserções, em 5 pastas — Health, Autenticação, Catálogo, Busca (OpenSearch) e Avaliações (DynamoDB) — e guarda os tokens e o `gameId` automaticamente.
+
+O admin não tem seed: depois de registrar `admin@fcg.com`, promova-o no banco e rode "Login admin" de novo:
+
+```bash
+kubectl exec -n fcg deploy/postgres -- psql -U fcg -d fcg_users_db -c "UPDATE users SET role=1 WHERE email='admin@fcg.com';"
+```
+
+Para rodar a coleção pela linha de comando: `docker run --rm -v "$PWD/postman:/etc/newman" postman/newman:alpine run FCG-Fase4.postman_collection.json`.
 
 ---
 
@@ -594,9 +623,9 @@ Para detalhes específicos sobre a lógica de domínio, padrões arquiteturais e
 
 ## Grupo 14
 
-Projeto desenvolvido para o **Tech Challenge — Fase 3** da pós-graduação em **Full Stack Developer** — FIAP.
+Projeto desenvolvido para o **Tech Challenge — Fase 4** da pós-graduação em **Full Stack Developer** — FIAP (evolução das Fases 2 e 3).
 
-**Tecnologias:** .NET 10 (.NET 8 na Lambda) · ASP.NET Core · Entity Framework Core · PostgreSQL · RabbitMQ · MassTransit · Redis · Kong · Prometheus · Grafana · AWS Lambda · Amazon SQS · Amazon DynamoDB · Docker · Kubernetes
+**Tecnologias:** .NET 10 · ASP.NET Core · Entity Framework Core · PostgreSQL · RabbitMQ · MassTransit · Redis · OpenSearch · Kong · Prometheus · Grafana · AWS (EKS, ECR, Lambda, SQS, DynamoDB, Secrets Manager) · Terraform · GitHub Actions · Trivy · Docker · Kubernetes
 
 ---
 
