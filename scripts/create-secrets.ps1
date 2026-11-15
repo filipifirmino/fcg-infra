@@ -37,6 +37,6 @@ Set-Secret "fcg-shared-secret" @{
 Set-Secret "catalog-api-secret" @{ "ConnectionStrings__Postgres" = "Host=postgres;Port=5432;Database=fcg_catalog_db;Username=fcg;Password=$postgres" }
 Set-Secret "users-api-secret" @{ "ConnectionStrings__Postgres" = "Host=postgres;Port=5432;Database=fcg_users_db;Username=fcg;Password=$postgres" }
 Set-Secret "payments-worker-secret" @{ "ConnectionStrings__Postgres" = "Host=postgres;Port=5432;Database=fcg_payments_db;Username=fcg;Password=$postgres" }
-Set-Secret "postgres-secret" @{ "POSTGRES_PASSWORD" = $postgres }
+Set-Secret "postgres-secret" @{ "POSTGRES_USER" = "fcg"; "POSTGRES_PASSWORD" = $postgres }
 Set-Secret "rabbitmq-secret" @{ "RABBITMQ_DEFAULT_USER" = "guest"; "RABBITMQ_DEFAULT_PASS" = $rabbit }
 Set-Secret "grafana-secret" @{ "GF_SECURITY_ADMIN_PASSWORD" = $grafana }

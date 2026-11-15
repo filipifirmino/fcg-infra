@@ -30,6 +30,6 @@ for entry in catalog-api-secret:fcg_catalog_db users-api-secret:fcg_users_db pay
     --from-literal=ConnectionStrings__Postgres="Host=postgres;Port=5432;Database=${entry##*:};Username=fcg;Password=$POSTGRES_PASSWORD"
 done
 
-apply_secret postgres-secret --from-literal=POSTGRES_PASSWORD="$POSTGRES_PASSWORD"
+apply_secret postgres-secret --from-literal=POSTGRES_USER=fcg --from-literal=POSTGRES_PASSWORD="$POSTGRES_PASSWORD"
 apply_secret rabbitmq-secret --from-literal=RABBITMQ_DEFAULT_USER=guest --from-literal=RABBITMQ_DEFAULT_PASS="$RABBITMQ_PASSWORD"
 apply_secret grafana-secret --from-literal=GF_SECURITY_ADMIN_PASSWORD="$GRAFANA_ADMIN_PASSWORD"

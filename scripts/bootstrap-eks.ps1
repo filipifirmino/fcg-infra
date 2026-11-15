@@ -12,6 +12,7 @@ $esoRole = terraform -chdir="$root/terraform" output -raw external_secrets_role_
 aws eks update-kubeconfig --name $cluster --region $Region --profile $AwsProfile
 
 kubectl apply -f "$root/k8s/00-namespace.yaml"
+kubectl apply -f "$root/k8s/eks"
 
 helm repo add external-secrets https://charts.external-secrets.io
 helm upgrade --install external-secrets external-secrets/external-secrets `
