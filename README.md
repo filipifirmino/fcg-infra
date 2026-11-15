@@ -501,6 +501,8 @@ Ponto de entrada único: **`http://localhost:8000`** (Docker Compose) ou o DNS d
 | Método | Rota | Auth | Serviço |
 |---|---|---|---|
 | `POST` | `/api/v1/User/register` | Pública | UsersAPI |
+| `GET` | `/health/users` | Pública | UsersAPI (health check) |
+| `GET` | `/health/catalog` | Pública | CatalogAPI (health check) |
 | `POST` | `/api/v1/Auth/login` | Pública | UsersAPI |
 | `GET` | `/api/v1/User/get-all` | JWT (Admin) | UsersAPI |
 | `GET` | `/api/v1/User/get-by-id` | JWT (Admin) | UsersAPI |

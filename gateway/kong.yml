@@ -28,6 +28,20 @@ services:
         plugins:
           - name: jwt
 
+  - name: users-health
+    url: http://users-api:8080/health
+    routes:
+      - name: users-health
+        paths: ["/health/users"]
+        strip_path: true
+
+  - name: catalog-health
+    url: http://catalog-api:8080/health
+    routes:
+      - name: catalog-health
+        paths: ["/health/catalog"]
+        strip_path: true
+
 consumers:
   - username: fcg-client
     jwt_secrets:

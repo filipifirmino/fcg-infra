@@ -33,6 +33,20 @@ data:
             plugins:
               - name: jwt
 
+      - name: users-health
+        url: http://users-api.fcg.svc.cluster.local/health
+        routes:
+          - name: users-health
+            paths: ["/health/users"]
+            strip_path: true
+
+      - name: catalog-health
+        url: http://catalog-api.fcg.svc.cluster.local/health
+        routes:
+          - name: catalog-health
+            paths: ["/health/catalog"]
+            strip_path: true
+
     consumers:
       - username: fcg-client
         jwt_secrets:
