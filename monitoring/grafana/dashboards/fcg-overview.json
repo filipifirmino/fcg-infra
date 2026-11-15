@@ -4,8 +4,8 @@
   "timezone": "browser",
   "schemaVersion": 39,
   "version": 1,
-  "refresh": "10s",
-  "time": { "from": "now-15m", "to": "now" },
+  "refresh": "5s",
+  "time": { "from": "now-5m", "to": "now" },
   "panels": [
     {
       "id": 1,
@@ -43,7 +43,7 @@
       "datasource": { "type": "prometheus", "uid": "prometheus" },
       "targets": [
         {
-          "expr": "histogram_quantile(0.95, sum(rate(http_request_duration_seconds_bucket[5m])) by (le, job))",
+          "expr": "histogram_quantile(0.95, sum(rate(http_request_duration_seconds_bucket[1m])) by (le, job))",
           "legendFormat": "{{job}}",
           "refId": "A"
         }
@@ -51,17 +51,30 @@
     },
     {
       "id": 4,
-      "title": "Taxa de erro (5xx / total)",
+      "title": "Taxa de erro (4xx+5xx / total)",
       "type": "timeseries",
       "gridPos": { "h": 8, "w": 12, "x": 12, "y": 8 },
       "datasource": { "type": "prometheus", "uid": "prometheus" },
       "fieldConfig": {
-        "defaults": { "unit": "percentunit" },
+        "defaults": {
+          "unit": "percentunit",
+          "min": 0,
+          "max": 1,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "orange", "value": 0.01 },
+              { "color": "red", "value": 0.2 }
+            ]
+          },
+          "custom": { "thresholdsStyle": { "mode": "area" } }
+        },
         "overrides": []
       },
       "targets": [
         {
-          "expr": "sum(rate(http_request_duration_seconds_count{code=~\"5..\"}[5m])) by (job) / sum(rate(http_request_duration_seconds_count[5m])) by (job)",
+          "expr": "sum(rate(http_request_duration_seconds_count{code=~\"[45]..\"}[1m])) by (job) / sum(rate(http_request_duration_seconds_count[1m])) by (job)",
           "legendFormat": "{{job}}",
           "refId": "A"
         }
