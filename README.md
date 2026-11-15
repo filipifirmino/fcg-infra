@@ -630,7 +630,7 @@ Depois do `apply`:
    `aws secretsmanager put-secret-value --secret-id fcg/jwt --secret-string '{"secretKey":"..."}'`
    (formato de cada segredo na seção [Segredos](#segredos)).
 2. `scripts/bootstrap-eks.ps1` — configura o kubeconfig, instala o External Secrets Operator (Helm) e aplica namespace, ExternalSecrets e a plataforma (Postgres, RabbitMQ, Redis, Kong, Prometheus, Grafana).
-3. Cadastre `AWS_ROLE_ARN` (output `github_actions_role_arn`) como variável nos repositórios do GitHub.
+3. Após `gh auth login`, rode `scripts/configure-github.ps1`: cadastra `AWS_ROLE_ARN` (role `fcg-github-actions`) e `AWS_REGION` como variáveis e cria o environment `production` em `fcg-users-api` e `fcg-catalog-api`.
 4. Para a demonstração: `kubectl apply -f k8s/opensearch` (e `kubectl delete -f k8s/opensearch` ao final).
 
 **Custo aproximado enquanto ativo:** control plane do EKS (~US$ 0,10/h) + 2× `t3.large` (~US$ 0,17/h) + EBS/KMS — da ordem de US$ 7 por dia. Ao terminar: `terraform destroy` (ECR e segredos têm remoção forçada). O state é local (`terraform.tfstate`, ignorado pelo git): guarde-o até o `destroy`.
