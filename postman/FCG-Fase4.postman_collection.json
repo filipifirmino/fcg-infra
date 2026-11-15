@@ -1,0 +1,304 @@
+{
+  "info": {
+    "name": "FCG - Fase 4",
+    "description": "Testes da plataforma FIAP Cloud Games via Kong (EKS).\n\nOrdem: 1 Health -> 2 Autenticação -> 3 Catálogo -> 4 Busca -> 5 Avaliações.\n\nPré-requisito: o usuário admin@fcg.com precisa ser promovido a Admin direto no banco (não há seed):\nkubectl exec -n fcg deploy/postgres -- psql -U fcg -d fcg_users_db -c \"UPDATE users SET role=1 WHERE email='admin@fcg.com';\"\n\nDepois da promoção, rode novamente 'Login admin' para obter um token com o perfil Admin.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    { "key": "baseUrl", "value": "http://ad4edf8742d1e4add94f506bd0e22221-7d319eddbf82af9f.elb.us-east-1.amazonaws.com" },
+    { "key": "password", "value": "Fcg@12345" },
+    { "key": "adminToken", "value": "" },
+    { "key": "userToken", "value": "" },
+    { "key": "gameId", "value": "" }
+  ],
+  "item": [
+    {
+      "name": "1. Health",
+      "item": [
+        {
+          "name": "UsersAPI health",
+          "event": [{ "listen": "test", "script": { "type": "text/javascript", "exec": [
+            "pm.test('200 Healthy', () => {",
+            "  pm.response.to.have.status(200);",
+            "  pm.expect(pm.response.json().status).to.eql('Healthy');",
+            "});"
+          ] } }],
+          "request": { "method": "GET", "url": "{{baseUrl}}/health/users" }
+        },
+        {
+          "name": "CatalogAPI health",
+          "event": [{ "listen": "test", "script": { "type": "text/javascript", "exec": [
+            "pm.test('200 Healthy', () => {",
+            "  pm.response.to.have.status(200);",
+            "  pm.expect(pm.response.json().status).to.eql('Healthy');",
+            "});"
+          ] } }],
+          "request": { "method": "GET", "url": "{{baseUrl}}/health/catalog" }
+        },
+        {
+          "name": "Rota protegida sem token (Kong JWT)",
+          "event": [{ "listen": "test", "script": { "type": "text/javascript", "exec": [
+            "pm.test('401 sem JWT', () => pm.response.to.have.status(401));"
+          ] } }],
+          "request": { "method": "GET", "url": "{{baseUrl}}/api/v1/games" }
+        }
+      ]
+    },
+    {
+      "name": "2. Autenticação",
+      "item": [
+        {
+          "name": "Registrar admin",
+          "event": [{ "listen": "test", "script": { "type": "text/javascript", "exec": [
+            "pm.test('201/200 ou já existente', () => pm.expect([200, 201, 400, 409]).to.include(pm.response.code));"
+          ] } }],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "url": "{{baseUrl}}/api/v1/User/register",
+            "body": { "mode": "raw", "raw": "{\n  \"name\": \"Admin FCG\",\n  \"email\": { \"value\": \"admin@fcg.com\" },\n  \"password\": { \"value\": \"{{password}}\" }\n}" }
+          }
+        },
+        {
+          "name": "Registrar jogador",
+          "event": [{ "listen": "test", "script": { "type": "text/javascript", "exec": [
+            "pm.test('201/200 ou já existente', () => pm.expect([200, 201, 400, 409]).to.include(pm.response.code));"
+          ] } }],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "url": "{{baseUrl}}/api/v1/User/register",
+            "body": { "mode": "raw", "raw": "{\n  \"name\": \"Jogador FCG\",\n  \"email\": { \"value\": \"jogador@fcg.com\" },\n  \"password\": { \"value\": \"{{password}}\" }\n}" }
+          }
+        },
+        {
+          "name": "Login admin",
+          "event": [{ "listen": "test", "script": { "type": "text/javascript", "exec": [
+            "pm.test('200 com token', () => {",
+            "  pm.response.to.have.status(200);",
+            "  const token = pm.response.json().data.token;",
+            "  pm.expect(token).to.be.a('string');",
+            "  pm.collectionVariables.set('adminToken', token);",
+            "});"
+          ] } }],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "url": "{{baseUrl}}/api/v1/Auth/login",
+            "body": { "mode": "raw", "raw": "{\n  \"email\": { \"value\": \"admin@fcg.com\" },\n  \"password\": { \"value\": \"{{password}}\" }\n}" }
+          }
+        },
+        {
+          "name": "Login jogador",
+          "event": [{ "listen": "test", "script": { "type": "text/javascript", "exec": [
+            "pm.test('200 com token', () => {",
+            "  pm.response.to.have.status(200);",
+            "  const token = pm.response.json().data.token;",
+            "  pm.expect(token).to.be.a('string');",
+            "  pm.collectionVariables.set('userToken', token);",
+            "});"
+          ] } }],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "url": "{{baseUrl}}/api/v1/Auth/login",
+            "body": { "mode": "raw", "raw": "{\n  \"email\": { \"value\": \"jogador@fcg.com\" },\n  \"password\": { \"value\": \"{{password}}\" }\n}" }
+          }
+        },
+        {
+          "name": "Login com senha errada",
+          "event": [{ "listen": "test", "script": { "type": "text/javascript", "exec": [
+            "pm.test('rejeita credenciais inválidas', () => pm.expect([400, 401]).to.include(pm.response.code));"
+          ] } }],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "url": "{{baseUrl}}/api/v1/Auth/login",
+            "body": { "mode": "raw", "raw": "{\n  \"email\": { \"value\": \"admin@fcg.com\" },\n  \"password\": { \"value\": \"Errada@999\" }\n}" }
+          }
+        }
+      ]
+    },
+    {
+      "name": "3. Catálogo",
+      "item": [
+        {
+          "name": "Criar jogo (admin)",
+          "event": [{ "listen": "test", "script": { "type": "text/javascript", "exec": [
+            "pm.test('201 criado', () => {",
+            "  pm.response.to.have.status(201);",
+            "  pm.collectionVariables.set('gameId', pm.response.json().data.id);",
+            "});"
+          ] } }],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "url": "{{baseUrl}}/api/v1/games",
+            "auth": { "type": "bearer", "bearer": [{ "key": "token", "value": "{{adminToken}}", "type": "string" }] },
+            "body": { "mode": "raw", "raw": "{\n  \"title\": \"The Witcher 3\",\n  \"description\": \"RPG de mundo aberto com cacador de monstros\",\n  \"price\": 99.9,\n  \"genre\": \"RPG\",\n  \"slug\": \"the-witcher-3-{{$timestamp}}\",\n  \"isActive\": true\n}" }
+          }
+        },
+        {
+          "name": "Criar jogo como jogador (403)",
+          "event": [{ "listen": "test", "script": { "type": "text/javascript", "exec": [
+            "pm.test('403 sem perfil Admin', () => pm.response.to.have.status(403));"
+          ] } }],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "url": "{{baseUrl}}/api/v1/games",
+            "auth": { "type": "bearer", "bearer": [{ "key": "token", "value": "{{userToken}}", "type": "string" }] },
+            "body": { "mode": "raw", "raw": "{\n  \"title\": \"Nao deveria criar\",\n  \"price\": 1,\n  \"genre\": \"RPG\",\n  \"slug\": \"nao-criar\",\n  \"isActive\": true\n}" }
+          }
+        },
+        {
+          "name": "Listar jogos (cache Redis)",
+          "event": [{ "listen": "test", "script": { "type": "text/javascript", "exec": [
+            "pm.test('200 e lista', () => {",
+            "  pm.response.to.have.status(200);",
+            "  pm.expect(pm.response.json().data).to.be.an('array');",
+            "});",
+            "pm.test('tempo registrado', () => console.log('tempo (ms):', pm.response.responseTime));"
+          ] } }],
+          "request": {
+            "method": "GET",
+            "url": "{{baseUrl}}/api/v1/games",
+            "auth": { "type": "bearer", "bearer": [{ "key": "token", "value": "{{userToken}}", "type": "string" }] }
+          }
+        },
+        {
+          "name": "Atualizar jogo (admin)",
+          "event": [{ "listen": "test", "script": { "type": "text/javascript", "exec": [
+            "pm.test('200 atualizado', () => pm.response.to.have.status(200));"
+          ] } }],
+          "request": {
+            "method": "PATCH",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "url": "{{baseUrl}}/api/v1/games/{{gameId}}",
+            "auth": { "type": "bearer", "bearer": [{ "key": "token", "value": "{{adminToken}}", "type": "string" }] },
+            "body": { "mode": "raw", "raw": "{\n  \"title\": \"The Witcher 3\",\n  \"description\": \"RPG de mundo aberto - edicao completa\",\n  \"price\": 79.9,\n  \"genre\": \"RPG\",\n  \"slug\": \"the-witcher-3-goty\",\n  \"isActive\": true\n}" }
+          }
+        }
+      ]
+    },
+    {
+      "name": "4. Busca (OpenSearch)",
+      "item": [
+        {
+          "name": "Busca exata",
+          "event": [{ "listen": "test", "script": { "type": "text/javascript", "exec": [
+            "pm.test('200 e encontra Witcher', () => {",
+            "  pm.response.to.have.status(200);",
+            "  pm.expect(JSON.stringify(pm.response.json())).to.include('Witcher');",
+            "});"
+          ] } }],
+          "request": {
+            "method": "GET",
+            "url": { "raw": "{{baseUrl}}/api/v1/games/search?query=witcher", "host": ["{{baseUrl}}"], "path": ["api", "v1", "games", "search"], "query": [{ "key": "query", "value": "witcher" }] },
+            "auth": { "type": "bearer", "bearer": [{ "key": "token", "value": "{{userToken}}", "type": "string" }] }
+          }
+        },
+        {
+          "name": "Busca fuzzy (erro de digitação: witchr)",
+          "event": [{ "listen": "test", "script": { "type": "text/javascript", "exec": [
+            "pm.test('tolera erro de digitação', () => {",
+            "  pm.response.to.have.status(200);",
+            "  pm.expect(JSON.stringify(pm.response.json())).to.include('Witcher');",
+            "});"
+          ] } }],
+          "request": {
+            "method": "GET",
+            "url": { "raw": "{{baseUrl}}/api/v1/games/search?query=witchr", "host": ["{{baseUrl}}"], "path": ["api", "v1", "games", "search"], "query": [{ "key": "query", "value": "witchr" }] },
+            "auth": { "type": "bearer", "bearer": [{ "key": "token", "value": "{{userToken}}", "type": "string" }] }
+          }
+        },
+        {
+          "name": "Busca por descrição",
+          "event": [{ "listen": "test", "script": { "type": "text/javascript", "exec": [
+            "pm.test('200', () => pm.response.to.have.status(200));"
+          ] } }],
+          "request": {
+            "method": "GET",
+            "url": { "raw": "{{baseUrl}}/api/v1/games/search?query=mundo aberto", "host": ["{{baseUrl}}"], "path": ["api", "v1", "games", "search"], "query": [{ "key": "query", "value": "mundo aberto" }] },
+            "auth": { "type": "bearer", "bearer": [{ "key": "token", "value": "{{userToken}}", "type": "string" }] }
+          }
+        },
+        {
+          "name": "Filtro por gênero e preço máximo",
+          "event": [{ "listen": "test", "script": { "type": "text/javascript", "exec": [
+            "pm.test('200', () => pm.response.to.have.status(200));"
+          ] } }],
+          "request": {
+            "method": "GET",
+            "url": { "raw": "{{baseUrl}}/api/v1/games/search?genre=RPG&price=100&page=1&pageSize=10", "host": ["{{baseUrl}}"], "path": ["api", "v1", "games", "search"], "query": [{ "key": "genre", "value": "RPG" }, { "key": "price", "value": "100" }, { "key": "page", "value": "1" }, { "key": "pageSize", "value": "10" }] },
+            "auth": { "type": "bearer", "bearer": [{ "key": "token", "value": "{{userToken}}", "type": "string" }] }
+          }
+        }
+      ]
+    },
+    {
+      "name": "5. Avaliações (DynamoDB)",
+      "item": [
+        {
+          "name": "Avaliar jogo (jogador, nota 5)",
+          "event": [{ "listen": "test", "script": { "type": "text/javascript", "exec": [
+            "pm.test('avaliação salva', () => {",
+            "  pm.expect([200, 201]).to.include(pm.response.code);",
+            "  pm.expect(pm.response.json().data.rating).to.eql(5);",
+            "});"
+          ] } }],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "url": "{{baseUrl}}/api/v1/games/{{gameId}}/reviews",
+            "auth": { "type": "bearer", "bearer": [{ "key": "token", "value": "{{userToken}}", "type": "string" }] },
+            "body": { "mode": "raw", "raw": "{\n  \"rating\": 5,\n  \"comment\": \"Obra-prima\"\n}" }
+          }
+        },
+        {
+          "name": "Avaliar jogo (admin, nota 4)",
+          "event": [{ "listen": "test", "script": { "type": "text/javascript", "exec": [
+            "pm.test('avaliação salva', () => pm.expect([200, 201]).to.include(pm.response.code));"
+          ] } }],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "url": "{{baseUrl}}/api/v1/games/{{gameId}}/reviews",
+            "auth": { "type": "bearer", "bearer": [{ "key": "token", "value": "{{adminToken}}", "type": "string" }] },
+            "body": { "mode": "raw", "raw": "{\n  \"rating\": 4,\n  \"comment\": \"Muito bom\"\n}" }
+          }
+        },
+        {
+          "name": "Nota inválida (400)",
+          "event": [{ "listen": "test", "script": { "type": "text/javascript", "exec": [
+            "pm.test('400 nota fora de 1-5', () => {",
+            "  pm.response.to.have.status(400);",
+            "  pm.expect(pm.response.json().errors[0]).to.include('Nota');",
+            "});"
+          ] } }],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "url": "{{baseUrl}}/api/v1/games/{{gameId}}/reviews",
+            "auth": { "type": "bearer", "bearer": [{ "key": "token", "value": "{{userToken}}", "type": "string" }] },
+            "body": { "mode": "raw", "raw": "{\n  \"rating\": 9\n}" }
+          }
+        },
+        {
+          "name": "Listar avaliações do jogo",
+          "event": [{ "listen": "test", "script": { "type": "text/javascript", "exec": [
+            "pm.test('200 com avaliações', () => {",
+            "  pm.response.to.have.status(200);",
+            "  pm.expect(pm.response.json().data.length).to.be.at.least(2);",
+            "});"
+          ] } }],
+          "request": {
+            "method": "GET",
+            "url": "{{baseUrl}}/api/v1/games/{{gameId}}/reviews",
+            "auth": { "type": "bearer", "bearer": [{ "key": "token", "value": "{{userToken}}", "type": "string" }] }
+          }
+        }
+      ]
+    }
+  ]
+}
